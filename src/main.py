@@ -159,7 +159,7 @@ def show_radar_window(radar_sensor):
                         y = center_y - int(distance * scale * np.cos(angle_rad))
                         
                         if 0 <= x < img_size and 0 <= y < img_size:
-                            # Color by velocity
+                            # Color by velocity - Ensure i is within range of velocities
                             if i < len(velocities):
                                 vel = velocities[i]
                                 # Red for approaching, green for moving away
@@ -174,6 +174,7 @@ def show_radar_window(radar_sensor):
                                 color = (255, 255, 0)  # Yellow
                                 size = 3
                             
+                            # Draw the radar point
                             cv2.circle(img, (x, y), size, color, -1)
                     
                     # Show image
@@ -286,8 +287,9 @@ def main():
                                 print("Switching to ULTRA LOW quality mode due to performance")
                                 # Reduce update frequency drastically
                                 for sensor_name in sensor_manager.sensors:
-                                    sensor = sensor_manager.sensors[sensor_name]
-                                    sensor.update_frequency = max(5.0, sensor.update_frequency / 2)
+                                    if sensor_name in sensor_manager.sensors:  # Kiểm tra lại để đảm bảo sensor vẫn tồn tại
+                                        sensor = sensor_manager.sensors[sensor_name]
+                                        sensor.update_frequency = max(5.0, sensor.update_frequency / 2)
                                 sensor_render_interval = 1.0  # Reduce to once per second
                             
                         # Increase quality if FPS is high enough
@@ -298,14 +300,15 @@ def main():
                             # Apply quality changes
                             print("Returning to LOW quality mode")
                             for sensor_name in sensor_manager.sensors:
-                                sensor = sensor_manager.sensors[sensor_name]
-                                # Restore default update frequencies
-                                if sensor_name == 'camera':
-                                    sensor.update_frequency = 20.0
-                                elif sensor_name == 'lidar':
-                                    sensor.update_frequency = 10.0
-                                elif sensor_name == 'radar':
-                                    sensor.update_frequency = 25.0
+                                if sensor_name in sensor_manager.sensors:  # Kiểm tra lại để đảm bảo sensor vẫn tồn tại
+                                    sensor = sensor_manager.sensors[sensor_name]
+                                    # Restore default update frequencies
+                                    if sensor_name == 'camera':
+                                        sensor.update_frequency = 20.0
+                                    elif sensor_name == 'lidar':
+                                        sensor.update_frequency = 10.0
+                                    elif sensor_name == 'radar':
+                                        sensor.update_frequency = 25.0
                             sensor_render_interval = 0.5  # Back to normal
                     
                     # Decrease cooldown timer

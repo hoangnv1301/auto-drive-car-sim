@@ -255,62 +255,62 @@ class Environment:
             # Simple undulations only far from the road
             if abs(y) > road_width/2 + sidewalk_width + 5.0:
                 terrain_height = 0.2
-                
+            
             return terrain_height
 
         # Generate road points with terrain variations - reduced density
         for i in range(0, len(centerline_points), 2):  # Sample every other point
             if i < len(centerline_points):
                 x, y = centerline_points[i]
-                if i < len(centerline_tangents):
-                    tangent_x, tangent_y = centerline_tangents[i]
-                    
+            if i < len(centerline_tangents):
+                tangent_x, tangent_y = centerline_tangents[i]
+            
                     # Create points across the road width - reduced density
-                    for offset in np.linspace(-road_width/2, road_width/2, 16):  # Reduced from 24
-                        normal_x = -tangent_y
-                        normal_y = tangent_x
-                    
-                        # Road point
-                        road_x = x + normal_x * offset
-                        road_y = y + normal_y * offset
-                        points.append([road_x, road_y, 0.0])
-                        
-                        # Road color (darker in center, lighter at edges)
-                        intensity = 0.3 - 0.1 * abs(offset) / (road_width/2)
-                        colors.append([intensity, intensity, intensity])
-                        
+            for offset in np.linspace(-road_width/2, road_width/2, 16):  # Reduced from 24
+                normal_x = -tangent_y
+                normal_y = tangent_x
+            
+                # Road point
+                road_x = x + normal_x * offset
+                road_y = y + normal_y * offset
+                points.append([road_x, road_y, 0.0])
+                
+                # Road color (darker in center, lighter at edges)
+                intensity = 0.3 - 0.1 * abs(offset) / (road_width/2)
+                colors.append([intensity, intensity, intensity])
+                
                         # Add road markings - only critical ones
                         # Center line
-                        if abs(offset) < 0.2:  # Center solid line
-                            points.append([road_x, road_y, 0.02])
-                            colors.append([1.0, 1.0, 0.0])  # Yellow center line
-                        
-                        # Side lines (edge of road)
-                        if road_width/2 - 0.3 <= abs(offset) <= road_width/2:  # Edge lines
-                            points.append([road_x, road_y, 0.02])
-                            colors.append([1.0, 1.0, 1.0])  # White edge line
+                if abs(offset) < 0.2:  # Center solid line
+                    points.append([road_x, road_y, 0.02])
+                    colors.append([1.0, 1.0, 0.0])  # Yellow center line
+                
+                # Side lines (edge of road)
+                if road_width/2 - 0.3 <= abs(offset) <= road_width/2:  # Edge lines
+                    points.append([road_x, road_y, 0.02])
+                    colors.append([1.0, 1.0, 1.0])  # White edge line
                     
                     # Add sidewalks on each side of the road - simplified
-                    for side in [-1, 1]:
-                        normal_x = -tangent_y * side
-                        normal_y = tangent_x * side
-                        
-                        # Sidewalk width with slight variation
-                        for sw_offset in np.linspace(0, sidewalk_width, 3):  # Reduced from 5
-                            sidewalk_x = x + normal_x * (road_width/2 + sw_offset)
-                            sidewalk_y = y + normal_y * (road_width/2 + sw_offset)
-                            
-                            # Get terrain height at this position
-                            terrain_height = get_terrain_height(sidewalk_x, sidewalk_y)
-                            
-                            points.append([sidewalk_x, sidewalk_y, sidewalk_height + terrain_height])
-                            colors.append(left_sidewalk_color if side < 0 else right_sidewalk_color)
-        
+            for side in [-1, 1]:
+                normal_x = -tangent_y * side
+                normal_y = tangent_x * side
+                
+                # Sidewalk width with slight variation
+                for sw_offset in np.linspace(0, sidewalk_width, 3):  # Reduced from 5
+                    sidewalk_x = x + normal_x * (road_width/2 + sw_offset)
+                    sidewalk_y = y + normal_y * (road_width/2 + sw_offset)
+                    
+                    # Get terrain height at this position
+                    terrain_height = get_terrain_height(sidewalk_x, sidewalk_y)
+                    
+                    points.append([sidewalk_x, sidewalk_y, sidewalk_height + terrain_height])
+                    colors.append(left_sidewalk_color if side < 0 else right_sidewalk_color)
+                    
         # Add environmental elements very sparsely
         sampling_step = 80  # Increased from 30 for much fewer objects
         for i in range(0, len(centerline_points), sampling_step):
-            if i < len(centerline_points):
-                x, y = centerline_points[i]
+                if i < len(centerline_points):
+                    x, y = centerline_points[i]
                 if i < len(centerline_tangents):
                     tangent_x, tangent_y = centerline_tangents[i]
                     
@@ -384,7 +384,7 @@ class Environment:
                             # Roof center
                             points.append([building_x, building_y, building_height + terrain_height])
                             colors.append(building_color)
-        
+                            
         # Add lampposts - extremely sparse
         current_distance = 0
         for i in range(1, len(centerline_points), int(len(centerline_points)/4)):  # Only 4 lampposts total
@@ -446,7 +446,7 @@ class Environment:
                     if obj['id'] == obj_id:
                         obj['sensor_data'] = sensor_data
                         break
-                
+            
             self.last_sensor_update = self.time
         
         # Apply AI/control logic for autonomous vehicles first

@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/Users/airm1/Workspace/auto-drive-car/src/main.py", line 7, in <module>
+    from simulation.environment import Environment
+  File "/Users/airm1/Workspace/auto-drive-car/src/simulation/environment.py", line 267
+    if i < len(centerline_tangents):
+                                    ^
+IndentationError: unindent does not match any outer indentation level

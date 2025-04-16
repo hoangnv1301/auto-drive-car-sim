@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/Users/airm1/Workspace/auto-drive-car/src/main.py", line 7, in <module>
+    from simulation.environment import Environment
+  File "/Users/airm1/Workspace/auto-drive-car/src/simulation/environment.py", line 312
+    for sw_offset in np.linspace(0, sidewalk_width, 3):  # Reduced from 5
+IndentationError: unexpected indent
