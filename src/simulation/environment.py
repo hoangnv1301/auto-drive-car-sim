@@ -438,16 +438,28 @@ class Environment:
         enough_time_passed = self.time - self.last_sensor_update >= self.sensor_update_interval
         
         if enough_time_passed:
-            scene_data = self.get_scene_data()
-            for obj_id, sensor_manager in self.sensor_managers.items():
-                sensor_data = sensor_manager.update(scene_data, self.time)
-                # Store sensor data in the object
-                for obj in self.objects:
-                    if obj['id'] == obj_id:
-                        obj['sensor_data'] = sensor_data
-                        break
-            
-            self.last_sensor_update = self.time
+            try:
+                scene_data = self.get_scene_data()
+                
+                # Proper loop structure to safely access obj_id
+                for obj_id, sensor_manager in self.sensor_managers.items():
+                    try:
+                        sensor_data = sensor_manager.update(scene_data, self.time)
+                        
+                        # Find the matching object and update its sensor data
+                        for obj in self.objects:
+                            if obj['id'] == obj_id:
+                                obj['sensor_data'] = sensor_data
+                                break
+                    except Exception as e:
+                        # Only log errors, don't stop execution
+                        if not self.disable_debug:
+                            print(f"Error updating sensor for object {obj_id}: {e}")
+                
+                self.last_sensor_update = self.time
+            except Exception as e:
+                if not self.disable_debug:
+                    print(f"Error in sensor update step: {e}")
         
         # Apply AI/control logic for autonomous vehicles first
         for obj in self.objects:
