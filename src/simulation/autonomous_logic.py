@@ -215,10 +215,12 @@ class LaneKeepingLogic(AutonomousLogic):
         
         # Reduce debug logging - only print every 1000 frames instead of 100
         if hasattr(self, 'frame_counter') and self.frame_counter % 1000 == 0 and self.debug:
-            print(f"\n=== ROAD CURVE DEBUG INFO ===")
-            print(f"Road params: length={self.road_length}, curve_start={self.curve_start}, intensity={self.curve_intensity}")
-            print(f"Position x={x_position}, curve_t={curve_t}, calculated y={y}")
-            print(f"==============================\n")
+            # Road curve debug info disabled for performance optimization
+            # print(f"\n=== ROAD CURVE DEBUG INFO ===")
+            # print(f"Road params: length={self.road_length}, curve_start={self.curve_start}, intensity={self.curve_intensity}")
+            # print(f"Position x={x_position}, curve_t={curve_t}, calculated y={y}")
+            # print(f"==============================\n")
+            pass
         
         if hasattr(self, 'frame_counter'):
             self.frame_counter += 1
@@ -729,17 +731,8 @@ class LaneKeepingLogic(AutonomousLogic):
         # Add the curve adjustment
         steering_angle += curve_adjustment
         
-        # Print steering debug info periodically
-        if hasattr(self, 'steering_debug_counter') and self.steering_debug_counter % 50 == 0:
-            print(f"\n=== STEERING DEBUG INFO ===")
-            print(f"Steering: {round(steering_angle, 2)} rad ({'LEFT' if steering_angle < 0 else 'RIGHT'} {abs(round(steering_angle/self.max_steering*100))}%)")
-            print(f"Position Y: {round(current_y, 2)} (Lane Center: {round(lane_center_y, 2)}, Target: {round(lane_center_y + lane_offset, 2)})")
-            print(f"Heading: {round(vehicle_heading, 2)} rad")
-            print(f"Lane Position: {lane_position} with {1.5}m offset")
-            print(f"Left edge: {round(left_edge, 2)}m | Right edge: {round(right_edge, 2)}m")
-            print(f"==============================")
-            self.steering_debug_counter += 1
-        elif not hasattr(self, 'steering_debug_counter'):
+        # Steering debug info is disabled for performance
+        if not hasattr(self, 'steering_debug_counter'):
             self.steering_debug_counter = 0
         else:
             self.steering_debug_counter += 1
@@ -774,10 +767,7 @@ class LaneKeepingLogic(AutonomousLogic):
         acceleration = speed_result["acceleration"]
         
         # Print debug information
-        self._print_debug_info(vehicle, scene_data, {
-            'steering': steering_angle,
-            'acceleration': acceleration
-        }, road_info)
+        self._print_debug_info(scene_data)
         
         # Return control commands
         return {
@@ -1002,86 +992,42 @@ class LaneKeepingLogic(AutonomousLogic):
             "acceleration": acceleration
         }
 
-    def _print_debug_info(self, vehicle, scene_data, control_output, road_info=None):
-        """Print debug information about the vehicle's state and control decisions.
-        Only print a small fraction of the time to reduce performance impact."""
-        current_time = time.time()
-        
-        # Only print debug info every 3 seconds instead of 1 second
-        if not hasattr(self, 'last_debug_time') or current_time - self.last_debug_time > 3.0:
-            self.last_debug_time = current_time
-            
-            # Print vehicle data less frequently
-            debug_counter = getattr(self, 'debug_counter', 0) + 1
-            setattr(self, 'debug_counter', debug_counter)
-            
-            if debug_counter % 10 == 0:  # Print vehicle data very infrequently
-                # Tính vận tốc từ vector vận tốc
-                vehicle_speed = np.linalg.norm(vehicle['velocity']) if 'velocity' in vehicle else 0.0
+    def _print_debug_info(self, scene_data):
+        # Reduce debug information frequency - changed from 1500 to 5000 frames
+        if self.debug and hasattr(self, 'debug_counter') and self.debug_counter % 5000 == 0:
+            # Find the ego vehicle (autonomous vehicle) in the objects list
+            ego_vehicle = None
+            for obj in scene_data['objects']:
+                if obj.get('autonomous', False):
+                    ego_vehicle = obj
+                    break
+                    
+            if ego_vehicle:
+                position = ego_vehicle['position']
+                heading = ego_vehicle['rotation'][2]  # Z-axis rotation is the heading
+                velocity_vector = ego_vehicle['velocity']
+                speed = np.linalg.norm(velocity_vector)  # Calculate speed from velocity vector
                 
-                print("\n===== VEHICLE CONTROL DEBUG =====")
-                print(f"Current Speed: {vehicle_speed:.2f} m/s, Target Speed: {self.target_speed:.2f} m/s")
-                print(f"Current Y: {vehicle['position'][1]:.2f}, Lane Center: {road_info['lane_center_y'] if road_info else 'N/A':.2f}")
-                print(f"Lane Deviation: {abs(vehicle['position'][1] - (road_info['lane_center_y'] if road_info else 0)):.2f} m")
-                print(f"Emergency Mode: {self.emergency_mode}")
-                print(f"Distance to Obstacle: {self.distance_to_obstacle:.2f} m" if hasattr(self, 'distance_to_obstacle') else "No obstacle detected")
+                # Get steering angle from vehicle if available
+                steering_angle = ego_vehicle.get('steering', 0.0)
                 
-                print(f"Steering Output: {control_output['steering']:.4f}, Throttle Output: {control_output['acceleration']:.2f}")
-                # Kiểm tra nếu có giá trị phanh
-                if 'brake' in control_output:
-                    print(f"Brake Output: {control_output['brake']:.2f}")
-                else:
-                    print(f"Brake Output: 0.00")
-                print("===== END VEHICLE CONTROL DEBUG =====\n")
+                # Get target speed if available, otherwise use current speed
+                target_speed = getattr(self, 'target_speed', speed)
                 
-            if debug_counter % 5 == 0:  # Print steering wheel display less frequently
-                self._print_steering_wheel_display(control_output['steering'])
+                # Reduce console output by combining multiple lines into fewer lines
+                print(f"\n--- VEHICLE CONTROL DEBUG ---")
+                print(f"Position: ({position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f}) | " 
+                      f"Heading: {heading:.2f}° | Speed: {speed:.2f} m/s")
+                print(f"Steering angle: {steering_angle:.2f}° | " 
+                      f"Target speed: {target_speed:.2f} m/s")
+                print(f"-----------------------------\n")
 
-    def _print_steering_wheel_display(self, steering_angle):
-        """Display a visual representation of the steering wheel position.
-        
-        Args:
-            steering_angle: The current steering angle in radians
-        """
-        # Convert steering angle to degrees for display
-        angle_degrees = math.degrees(steering_angle)
-        
-        # Determine direction
-        direction = "RIGHT" if angle_degrees > 0 else "LEFT"
-        abs_angle = abs(angle_degrees)
-        
-        # Calculate percentage of maximum steering
-        max_angle_deg = math.degrees(self.max_steering_angle)
-        percentage = int(min(100, abs_angle / max_angle_deg * 100))
-        
-        # Create position indicator
-        indicator_pos = int(percentage / 10)  # 0-10 position
-        
-        # Create the steering wheel display
-        print("\n====== STEERING WHEEL DISPLAY ======")
-        print(f"Direction: {direction} ({abs_angle:.1f}°) - {percentage}% of max")
-        
-        # Draw the steering wheel
-        print("L    -    |    -    R")
-        
-        # Position indicator
-        if direction == "RIGHT":
-            indicator = " " * (12 + indicator_pos) + "▶" + " " * (10 - indicator_pos)
+        # Update counter
+        if hasattr(self, 'debug_counter'):
+            self.debug_counter += 1
         else:
-            indicator = " " * (12 - indicator_pos) + "◀" + " " * (10 + indicator_pos)
-        print(indicator)
-        
-        # Draw the base line
-        print("═" * 33)
-        
-        # Draw direction arrows
-        num_arrows = int(percentage / 5)  # 1 arrow for every 5%
-        if direction == "RIGHT":
-            arrows = " " * (18 - num_arrows) + "→" * num_arrows
-        else:
-            arrows = " " * (14) + "←" * num_arrows
-        print(arrows)
-        
+            self.debug_counter = 0
+
     def _calculate_relative_position(self, vehicle, obj):
         """Calculate the position of obj relative to vehicle in vehicle's coordinate frame."""
         # Get positions

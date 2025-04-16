@@ -44,8 +44,8 @@ class Renderer:
         # Store maximum steering angle
         self.max_steering_angle = 0.5  # radians
         
-        # Disable complex steering wheel visualizations that might cause hanging
-        self.use_simple_steering_display = True
+        # Disable steering wheel visualizations to improve performance
+        self.use_simple_steering_display = False
         
         # Create a visual steering wheel
         self.steering_wheel = self._create_steering_wheel()
@@ -626,159 +626,24 @@ class Renderer:
             
         # Get steering and position data
         steering_angle = main_vehicle.get('steering', 0)
-        pos_y = main_vehicle['position'][1]
-        heading = main_vehicle['rotation'][2]
-        
-        # Get actual target lane center and position from the autonomous logic
-        lane_center = 0.0  # Default
-        target_position = 0.0  # Default
-        
-        if 'debug_info' in main_vehicle:
-            debug_info = main_vehicle.get('debug_info', {})
-            lane_center = debug_info.get('lane_center', 0.0)
-            target_position = debug_info.get('target_position', 0.0)
-        
-        # If we couldn't get lane center from debug_info, try to calculate it
-        if lane_center == 0.0 and 'autonomous_logic' in scene_data:
-            autonomous_logic = scene_data['autonomous_logic']
-            if hasattr(autonomous_logic, 'calculate_lane_center'):
-                lane_center = autonomous_logic.calculate_lane_center(main_vehicle['position'][0])
-                
-            # And if we have a target position calculator, use it
-            if hasattr(autonomous_logic, 'calculate_target_position'):
-                target_position = autonomous_logic.calculate_target_position(main_vehicle['position'][0])
-        
-        # Get driving side and lane offset if available
-        driving_side = "center"
-        lane_offset = 0.0
-        if 'autonomous_logic' in scene_data:
-            autonomous_logic = scene_data['autonomous_logic']
-            if hasattr(autonomous_logic, 'driving_side'):
-                driving_side = autonomous_logic.driving_side
-            if hasattr(autonomous_logic, 'lane_offset'):
-                lane_offset = autonomous_logic.lane_offset
-        
-        # Calculate distance to road edges based on the lane center
-        road_width = 10.0  # Default from environment.py
-        if hasattr(scene_data.get('autonomous_logic', None), 'road_width'):
-            road_width = scene_data['autonomous_logic'].road_width
-        
-        left_edge = lane_center - road_width/2
-        right_edge = lane_center + road_width/2
-        distance_to_left = abs(pos_y - left_edge)
-        distance_to_right = abs(pos_y - right_edge)
         
         # Update the 3D steering wheel
         self._update_steering_wheel(steering_angle)
         
-        # Create simple terminal-based steering wheel visualization instead of GUI
-        # This avoids the hanging issues with matplotlib or Open3D windows
-        if self.use_simple_steering_display:
-            # Use only for special frames to avoid overwhelming the terminal
-            if not hasattr(self, 'frame_count'):
-                self.frame_count = 0
-            
-            # Display steering wheel on every frame for more responsive UI
-            self._display_text_steering_wheel(steering_angle)
-                
-        # Format steering indicator for console output
-        steering_percentage = abs(steering_angle / 0.5) * 100  # Assuming max_steering_angle is 0.5
-        steering_dir = "RIGHT" if steering_angle > 0 else "LEFT" if steering_angle < 0 else "CENTER"
-        steering_bar = "=" * int(steering_percentage / 5)
-        
-        # Create text for console log
-        text = [
-            f"Steering: {steering_angle:.2f} rad ({steering_dir} {steering_percentage:.0f}%)",
-            f"Position Y: {pos_y:.2f} (Lane Center: {lane_center:.2f}, Target: {target_position:.2f})",
-            f"Heading: {heading:.2f} rad",
-            f"Lane Position: {driving_side.upper()} with {lane_offset:.1f}m offset",
-            f"Left edge: {distance_to_left:.2f}m | Right edge: {distance_to_right:.2f}m"
-        ]
-        
-        # Add to debug log
+        # All debug printing is disabled to improve performance
+        # Only print FPS every 150 frames
         if hasattr(self, 'frame_count'):
             self.frame_count += 1
         else:
             self.frame_count = 0
             
-        if self.frame_count % 30 == 0:  # Print full debug info less frequently
-            print("\n=== STEERING DEBUG INFO ===")
-            for line in text:
-                print(line)
-            print("==============================")
-            
-    def _display_text_steering_wheel(self, steering_angle):
-        """Display a simple text-based steering wheel visualization in the terminal.
-        
-        Args:
-            steering_angle (float): Current steering angle in radians
-        """
-        # Convert steering angle to an integer position for the display
-        # Our steering wheel is 25 characters wide (-12 to +12)
-        wheel_width = 25
-        center = wheel_width // 2
-        
-        # Scale the steering angle to fit our display
-        # Get max steering from the autonomous logic if available
-        max_angle = self.max_steering_angle
-        
-        # Calculate steering percentage (0-100%)
-        steering_percent = min(100, max(0, abs(steering_angle / max_angle * 100)))
-        
-        # Create more granular position for smoother visualization
-        # Scale by 12 instead of 10 for more sensitivity to small changes
-        position = int(round(steering_angle / max_angle * 12))
-        
-        # Clamp to our display range
-        position = max(-12, min(12, position))
-        
-        # Create the wheel display with enhanced visuals
-        wheel = [" "] * wheel_width
-        wheel[center] = "|"  # Center mark
-        
-        # Create a more noticeable indicator with arrow showing direction
-        indicator_pos = center + position
-        if 0 <= indicator_pos < wheel_width:
-            if position < 0:
-                wheel[indicator_pos] = "◀"  # Left arrow for left steering
-            elif position > 0:
-                wheel[indicator_pos] = "▶"  # Right arrow for right steering
-            else:
-                wheel[indicator_pos] = "O"  # Center dot for straight
-        
-        # Create the display string
-        wheel_str = "".join(wheel)
-        
-        # Create tick marks for reference with clear marks at intervals
-        ticks = [" "] * wheel_width
-        ticks[center - 12] = "L"   # Left max
-        ticks[center - 8] = "|"    # Left 2/3
-        ticks[center - 4] = "|"    # Left 1/3
-        ticks[center] = "|"        # Center
-        ticks[center + 4] = "|"    # Right 1/3
-        ticks[center + 8] = "|"    # Right 2/3
-        ticks[center + 12] = "R"   # Right max
-        ticks_str = "".join(ticks)
-        
-        # Print the steering wheel display with enhanced border
-        direction = "RIGHT" if steering_angle > 0 else "LEFT" if steering_angle < 0 else "CENTER"
-        angle_deg = abs(np.rad2deg(steering_angle))
-        
-        # Create a progress bar style display for the steering amount
-        progress_width = 20
-        filled_width = int(steering_percent / 100 * progress_width)
-        progress_bar = "█" * filled_width + "░" * (progress_width - filled_width)
-        
-        # Enhanced visualization with thicker borders and more information
-        print("\n====== STEERING WHEEL DISPLAY ======")
-        print(f"Direction: {direction} ({angle_deg:.1f}°) - {steering_percent:.0f}% of max")
-        print(f"L    -    |    -    R")
-        print(wheel_str)
-        print("═════════════════════════════")
-        
-        # Print advanced steering visualization showing intensity
-        if filled_width > 0:
-            if position < 0:  # Left steering
-                print(f"{'←' * filled_width}")
-            else:  # Right steering
-                print(f"{' ' * (progress_width - filled_width)}{'→' * filled_width}") 
+        # Only output FPS occasionally
+        if self.frame_count % 150 == 0:
+            # Get objects count
+            objects_count = len(scene_data.get('objects', []))
+            # Calculate FPS
+            current_time = time.time()
+            if hasattr(self, 'last_fps_time'):
+                fps = 1.0 / max(0.001, current_time - self.last_fps_time)
+                print(f"FPS: {fps:.1f}, Objects: {objects_count}")
+            self.last_fps_time = current_time 

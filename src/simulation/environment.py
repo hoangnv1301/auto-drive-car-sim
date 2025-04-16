@@ -13,7 +13,7 @@ from .autonomous_logic import get_autonomous_logic
 from src.sensors.sensor_manager import SensorManager
 
 class Environment:
-    def __init__(self, scenario='basic_intersection', low_quality=False, disable_debug=False):
+    def __init__(self, scenario='basic_intersection', low_quality=False, disable_debug=True):
         """Initialize the simulation environment.
         
         Args:
@@ -473,12 +473,6 @@ class Environment:
                 
         # Check for collisions
         self._check_collisions()
-        
-        # Print debug info only if not disabled and less frequently
-        if not self.disable_debug and int(self.time * 10) % 200 == 0:  # Reduced from 50 to 200 (less frequent)
-            # Log simulation stats every ~20 seconds instead of ~5 seconds
-            active_sensors = sum(len(sm.sensors) for sm in self.sensor_managers.values())
-            print(f"Simulation time: {self.time:.1f}s, FPS: {1.0/self.time_step:.1f}, Active sensors: {active_sensors}")
     
     def _update_physics(self):
         """Update the physics state of all objects based on their velocity."""
@@ -657,7 +651,7 @@ class Environment:
                         # Collision detected!
                         self._handle_collision(obj1, obj2)
                         
-                        # Add debug info
+                        # Add debug info to objects but don't print anything
                         if 'debug_info' not in obj1:
                             obj1['debug_info'] = {}
                         if 'debug_info' not in obj2:
@@ -665,14 +659,6 @@ class Environment:
                             
                         obj1['debug_info']['collision'] = True
                         obj2['debug_info']['collision'] = True
-                        
-                        # Print collision information
-                        print(f"\n!!! COLLISION DETECTED !!!")
-                        print(f"Object {obj1['id']} ({obj1['type']}) and Object {obj2['id']} ({obj2['type']})")
-                        print(f"Distance: {distance:.2f}m, Required separation: {(combined_half_length + combined_half_width) / 2:.2f}m")
-                        print(f"Positions: {obj1['position']} and {obj2['position']}")
-                        print(f"Velocities: {obj1['velocity']} and {obj2['velocity']}")
-                        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
 
     def _handle_collision(self, obj1, obj2):
         """Handle collision between two objects."""

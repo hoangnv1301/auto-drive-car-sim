@@ -262,7 +262,7 @@ def main():
             current_time = time.time()
             delta_time = current_time - last_time
             
-            if delta_time >= 1.0:
+            if delta_time >= 5.0:  # Only print FPS every 5 seconds instead of every second
                 fps = frame_count / delta_time
                 print(f"FPS: {fps:.1f}, Objects: {len(env.objects)}")
                 
