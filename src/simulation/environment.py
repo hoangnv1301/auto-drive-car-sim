@@ -262,49 +262,49 @@ class Environment:
         for i in range(0, len(centerline_points), 2):  # Sample every other point
             if i < len(centerline_points):
                 x, y = centerline_points[i]
-            if i < len(centerline_tangents):
-                tangent_x, tangent_y = centerline_tangents[i]
-            
+                if i < len(centerline_tangents):
+                    tangent_x, tangent_y = centerline_tangents[i]
+                    
                     # Create points across the road width - reduced density
-            for offset in np.linspace(-road_width/2, road_width/2, 16):  # Reduced from 24
-                normal_x = -tangent_y
-                normal_y = tangent_x
-            
-                # Road point
-                road_x = x + normal_x * offset
-                road_y = y + normal_y * offset
-                points.append([road_x, road_y, 0.0])
-                
-                # Road color (darker in center, lighter at edges)
-                intensity = 0.3 - 0.1 * abs(offset) / (road_width/2)
-                colors.append([intensity, intensity, intensity])
-                
+                    for offset in np.linspace(-road_width/2, road_width/2, 16):  # Reduced from 24
+                        normal_x = -tangent_y
+                        normal_y = tangent_x
+                        
+                        # Road point
+                        road_x = x + normal_x * offset
+                        road_y = y + normal_y * offset
+                        points.append([road_x, road_y, 0.0])
+                        
+                        # Road color (darker in center, lighter at edges)
+                        intensity = 0.3 - 0.1 * abs(offset) / (road_width/2)
+                        colors.append([intensity, intensity, intensity])
+                        
                         # Add road markings - only critical ones
                         # Center line
-                if abs(offset) < 0.2:  # Center solid line
-                    points.append([road_x, road_y, 0.02])
-                    colors.append([1.0, 1.0, 0.0])  # Yellow center line
-                
-                # Side lines (edge of road)
-                if road_width/2 - 0.3 <= abs(offset) <= road_width/2:  # Edge lines
-                    points.append([road_x, road_y, 0.02])
-                    colors.append([1.0, 1.0, 1.0])  # White edge line
+                        if abs(offset) < 0.2:  # Center solid line
+                            points.append([road_x, road_y, 0.02])
+                            colors.append([1.0, 1.0, 0.0])  # Yellow center line
+                        
+                        # Side lines (edge of road)
+                        if road_width/2 - 0.3 <= abs(offset) <= road_width/2:  # Edge lines
+                            points.append([road_x, road_y, 0.02])
+                            colors.append([1.0, 1.0, 1.0])  # White edge line
                     
                     # Add sidewalks on each side of the road - simplified
-            for side in [-1, 1]:
-                normal_x = -tangent_y * side
-                normal_y = tangent_x * side
-                
-                # Sidewalk width with slight variation
-                for sw_offset in np.linspace(0, sidewalk_width, 3):  # Reduced from 5
-                    sidewalk_x = x + normal_x * (road_width/2 + sw_offset)
-                    sidewalk_y = y + normal_y * (road_width/2 + sw_offset)
-                    
-                    # Get terrain height at this position
-                    terrain_height = get_terrain_height(sidewalk_x, sidewalk_y)
-                    
-                    points.append([sidewalk_x, sidewalk_y, sidewalk_height + terrain_height])
-                    colors.append(left_sidewalk_color if side < 0 else right_sidewalk_color)
+                    for side in [-1, 1]:
+                        normal_x = -tangent_y * side
+                        normal_y = tangent_x * side
+                        
+                        # Sidewalk width with slight variation
+                        for sw_offset in np.linspace(0, sidewalk_width, 3):  # Reduced from 5
+                            sidewalk_x = x + normal_x * (road_width/2 + sw_offset)
+                            sidewalk_y = y + normal_y * (road_width/2 + sw_offset)
+                            
+                            # Get terrain height at this position
+                            terrain_height = get_terrain_height(sidewalk_x, sidewalk_y)
+                            
+                            points.append([sidewalk_x, sidewalk_y, sidewalk_height + terrain_height])
+                            colors.append(left_sidewalk_color if side < 0 else right_sidewalk_color)
                     
         # Add environmental elements very sparsely
         sampling_step = 80  # Increased from 30 for much fewer objects
@@ -632,22 +632,61 @@ class Environment:
                 obj1 = self.objects[i]
                 obj2 = self.objects[j]
                 
-                # Only check collisions between vehicles
-                if obj1['type'] in [ObjectType.CAR, ObjectType.TRUCK] and obj2['type'] in [ObjectType.CAR, ObjectType.TRUCK]:
+                # Only check collisions between vehicles and other entities (except pedestrians with each other)
+                if ((obj1['type'] in [ObjectType.CAR, ObjectType.TRUCK, ObjectType.TRICAR, ObjectType.CYCLIST]) or 
+                    (obj2['type'] in [ObjectType.CAR, ObjectType.TRUCK, ObjectType.TRICAR, ObjectType.CYCLIST])):
+                    
                     # Get positions and dimensions
-                    pos1 = obj1['position']
-                    pos2 = obj2['position']
+                    pos1 = np.array(obj1['position'])
+                    pos2 = np.array(obj2['position'])
+                    
+                    # Calculate separation distances more accurately considering rotation
+                    # Get rotation around z-axis (yaw) in radians
+                    rot1 = np.radians(obj1['rotation'][2])
+                    rot2 = np.radians(obj2['rotation'][2])
+                    
+                    # Get dimensions
+                    dim1 = np.array(obj1['dimensions'])
+                    dim2 = np.array(obj2['dimensions'])
                     
                     # Calculate 2D distance between centers
                     distance = np.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
                     
-                    # Combined half-lengths and half-widths
-                    combined_half_length = (obj1['dimensions'][0] + obj2['dimensions'][0]) / 2
-                    combined_half_width = (obj1['dimensions'][1] + obj2['dimensions'][1]) / 2
+                    # Calculate direction vector between objects
+                    direction = pos2[:2] - pos1[:2]
+                    if np.linalg.norm(direction) > 0:
+                        direction = direction / np.linalg.norm(direction)
                     
-                    # Simplified collision check (rectangular bounding boxes)
-                    # More accurate would account for rotation, but this is simpler
-                    if distance < (combined_half_length + combined_half_width) / 2:
+                    # Calculate directional vectors for both objects based on their rotation
+                    dir1 = np.array([np.cos(rot1), np.sin(rot1)])
+                    dir2 = np.array([np.cos(rot2), np.sin(rot2)])
+                    
+                    # Calculate perpendicular directions
+                    perp1 = np.array([-dir1[1], dir1[0]])
+                    perp2 = np.array([-dir2[1], dir2[0]])
+                    
+                    # Project direction vector onto object's primary and secondary axes
+                    proj1_main = np.abs(np.dot(direction, dir1))
+                    proj1_perp = np.abs(np.dot(direction, perp1))
+                    
+                    # Calculate half-lengths and half-widths
+                    half_length1 = dim1[0] / 2
+                    half_width1 = dim1[1] / 2
+                    half_length2 = dim2[0] / 2
+                    half_width2 = dim2[1] / 2
+                    
+                    # Calculate separation threshold based on the projection
+                    sep_threshold_main = proj1_main * (half_length1 + half_length2) + (1 - proj1_main) * (half_width1 + half_width2)
+                    sep_threshold_perp = proj1_perp * (half_width1 + half_width2) + (1 - proj1_perp) * (half_length1 + half_length2)
+                    
+                    # Use the smaller threshold for more accurate detection
+                    separation_threshold = min(sep_threshold_main, sep_threshold_perp)
+                    
+                    # Add some safety margin
+                    separation_threshold *= 0.95
+                    
+                    # Check for collision with improved method
+                    if distance < separation_threshold:
                         # Collision detected!
                         self._handle_collision(obj1, obj2)
                         
@@ -665,8 +704,8 @@ class Environment:
         # Simple collision response - reduce velocity and apply repulsion force
         
         # Reduce velocities (simulating energy loss)
-        obj1['velocity'] *= 0.5
-        obj2['velocity'] *= 0.5
+        obj1['velocity'] = np.array(obj1['velocity']) * 0.5
+        obj2['velocity'] = np.array(obj2['velocity']) * 0.5
         
         # Calculate direction vector from obj1 to obj2
         # Convert positions to numpy arrays before subtraction
@@ -686,15 +725,15 @@ class Environment:
         mass2 = np.prod(obj2['dimensions'])
         
         # Apply a repulsion force to separate objects
-        repulsion_strength = 2.0  # Strength of repulsion force
+        repulsion_strength = 3.0  # Increased strength of repulsion force
         
         # Apply stronger force to the lighter object
         force1 = -repulsion_strength * mass2 / (mass1 + mass2) * direction
         force2 = repulsion_strength * mass1 / (mass1 + mass2) * direction
         
         # Apply the forces by directly modifying position
-        obj1['position'] += force1 * self.time_step
-        obj2['position'] += force2 * self.time_step
+        obj1['position'] = pos1 + force1 * self.time_step
+        obj2['position'] = pos2 + force2 * self.time_step
     
     def add_object(self, obj_type, position, rotation, velocity, dimensions, autonomous=False):
         """Add a new object to the simulation."""

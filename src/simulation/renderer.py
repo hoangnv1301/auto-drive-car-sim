@@ -24,3 +24,4 @@ def _render_debug_info(self, steering_angle, fps, frame_counter):
     fps_surface = self.debug_font.render(fps_text, True, (255, 255, 255))
     fps_rect = fps_surface.get_rect(topleft=(10, 10))
     self.screen.blit(fps_surface, fps_rect)
+ 

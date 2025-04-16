@@ -146,13 +146,13 @@ class LaneKeepingLogic(AutonomousLogic):
         self.natural_understeer = 0.1
         
         # Collision avoidance parameters
-        self.avoidance_lane_shift = 3.0  # Increased from 2.5 for wider avoidance
-        self.avoidance_shift_speed = 0.1  # Increased from 0.08 for faster lateral movements
+        self.avoidance_lane_shift = 3.5  # Tăng từ 3.0 để né rộng hơn
+        self.avoidance_shift_speed = 0.15  # Tăng từ 0.1 để né nhanh hơn
         self.obstacle_recovery_rate = 0.02
         self.current_lane_shift = 0.0
         self.returning_to_lane = False
-        self.obstacle_detection_distance = 45.0  # Increased from 40.0 for earlier detection
-        self.lateral_safety_margin = 1.2  # Increased from 1.0 for wider safety margin
+        self.obstacle_detection_distance = 60.0  # Tăng từ 45.0 để phát hiện sớm hơn
+        self.lateral_safety_margin = 1.5  # Tăng từ 1.2 để giữ khoảng cách lớn hơn
         
         # Emergency management
         self.emergency_mode = False
@@ -921,15 +921,24 @@ class LaneKeepingLogic(AutonomousLogic):
             # Adjust thresholds based on object type
             distance_multiplier = 1.0
             
+            # Kiểm tra xem đây có phải là xe đỗ hay người đi bộ cắt ngang không
+            is_parked_vehicle = obstacle_info is not None and obstacle_info.get('is_parked_vehicle', False)
+            is_crossing_pedestrian = obstacle_info is not None and obstacle_info.get('is_crossing_pedestrian', False)
+            
             # Vulnerable road users require extra caution
             if obj_type == 'PEDESTRIAN':
-                distance_multiplier = 1.5  # Give pedestrians more space
+                distance_multiplier = 2.0  # Tăng từ 1.5 lên 2.0 cho người đi bộ
+                # Thêm điều chỉnh cho người đi bộ cắt ngang
+                if is_crossing_pedestrian:
+                    distance_multiplier = 2.5  # Tăng khoảng cách an toàn cho người đi bộ cắt ngang
             elif obj_type == 'CYCLIST':
-                distance_multiplier = 1.3  # Give cyclists more space
+                distance_multiplier = 1.8  # Tăng từ 1.3 lên 1.8 cho xe đạp
+            elif is_parked_vehicle:
+                distance_multiplier = 1.2  # Tăng khoảng cách an toàn cho xe đỗ
             
             # Define distance thresholds with type-based adjustment
-            critical_distance = self.collision_threshold * 0.8 * distance_multiplier
-            safe_distance = self.collision_threshold * 1.5 * distance_multiplier
+            critical_distance = self.collision_threshold * 1.0 * distance_multiplier  # Tăng từ 0.8 lên 1.0
+            safe_distance = self.collision_threshold * 2.0 * distance_multiplier  # Tăng từ 1.5 lên 2.0
             
             # Get certainty information if available
             detection_certainty = 1.0  # Default to full certainty
@@ -964,6 +973,13 @@ class LaneKeepingLogic(AutonomousLogic):
                                   (safe_distance - critical_distance))
                 target_emergency = max(0.0, min(1.0, proximity))
             
+            # Điều chỉnh mức độ khẩn cấp cho xe đỗ
+            if is_parked_vehicle:
+                # Xe đỗ tạo mức độ khẩn cấp vừa phải, không cần dừng lại hoàn toàn
+                # Nhưng cần điều chỉnh lớn hơn nếu khoảng cách gần
+                if distance_to_obstacle < critical_distance * 1.5:
+                    target_emergency = min(1.0, target_emergency * 1.2)
+            
             # Adjust target emergency based on object type
             if obj_type == 'PEDESTRIAN':
                 # More cautious with pedestrians
@@ -979,10 +995,20 @@ class LaneKeepingLogic(AutonomousLogic):
             if target_emergency > self.emergency_blend:
                 # Quick response to danger - increase speed depends on certainty
                 increase_rate = max(0.1, (target_emergency - self.emergency_blend) * 0.4 * detection_certainty)
+                
+                # Tăng cấp phản ứng cho người đi bộ cắt ngang
+                if is_crossing_pedestrian:
+                    increase_rate *= 1.5
+                
                 self.emergency_blend = min(1.0, self.emergency_blend + increase_rate)
             else:
                 # Slower return to normal - more gradual with lower certainty
                 decrease_rate = 0.05 * min(1.0, 0.5 + 0.5 * detection_certainty)
+                
+                # Giảm tốc độ giảm mức khẩn cấp cho người đi bộ cắt ngang
+                if is_crossing_pedestrian:
+                    decrease_rate *= 0.5
+                
                 self.emergency_blend = max(0.0, self.emergency_blend - decrease_rate)
         else:
             # No obstacles, gradually reduce emergency level
@@ -1018,18 +1044,31 @@ class LaneKeepingLogic(AutonomousLogic):
                 # Calculate distance to obstacle (reuse provided distance if available)
                 distance = distance_to_obstacle if distance_to_obstacle < float('inf') else self._calculate_distance(rel_pos)
                 
-                # Calculate intensity based on distance (closer = stronger response)
-                # Smoother intensity curve with improved response near collision threshold
-                intensity = max(0.0, min(1.0, self.collision_threshold / max(0.1, distance)))
+                # Xử lý đặc biệt cho xe đỗ - né với biên độ lớn hơn
+                if is_parked_vehicle:
+                    # Tính khoảng cách ngang đến xe đỗ
+                    lateral_distance = abs(rel_pos[1])
+                    
+                    # Quyết định hướng né tránh
+                    # Lấy hướng từ avoidance_direction hoặc tính toán
+                    if avoidance_direction == 0:
+                        # Nếu không có hướng sẵn, tính hướng né dựa trên vị trí ngang
+                        avoidance_direction = -1 if rel_pos[1] > 0 else 1
+                    
+                    # Tính cường độ né tránh dựa trên khoảng cách
+                    # Áp dụng cường độ cao hơn cho xe đỗ
+                    intensity = max(0.0, min(1.0, self.collision_threshold * 1.2 / max(0.1, distance)))
+                    intensity *= 1.3  # Tăng cường độ né tránh cho xe đỗ
                 
-                # Apply non-linear intensity scale - more responsive at medium distances
-                if distance < self.collision_threshold * 0.5:
-                    # Very close - maximum response
-                    intensity = 1.0
+                # Xử lý đặc biệt cho người đi bộ cắt ngang - dừng lại và không đổi hướng
+                elif is_crossing_pedestrian:
+                    # Chỉ áp dụng né tránh nhỏ, ưu tiên dừng lại
+                    intensity = max(0.0, min(1.0, self.collision_threshold / max(0.1, distance)))
+                    intensity *= 0.7  # Giảm cường độ né tránh vì ưu tiên dừng hơn là né
                 else:
-                    # Adjust response curve for medium distances
-                    proximity = 1.0 - (distance - self.collision_threshold * 0.5) / (self.collision_threshold * 0.5)
-                    intensity = max(0.0, min(1.0, proximity ** 1.5))  # Non-linear curve
+                    # Calculate intensity based on distance (closer = stronger response)
+                    # Smoother intensity curve with improved response near collision threshold
+                    intensity = max(0.0, min(1.0, self.collision_threshold / max(0.1, distance)))
                 
                 # Apply certainty scaling if available
                 if obstacle_info and 'detection_certainty' in obstacle_info:
@@ -1075,6 +1114,14 @@ class LaneKeepingLogic(AutonomousLogic):
                 # Calculate avoidance steering (smooth and proportional)
                 max_avoidance_angle = 0.2  # Maximum steering angle for avoidance
                 avoidance_steering = avoidance_direction * intensity * max_avoidance_angle
+                
+                # Điều chỉnh góc lái cho xe đỗ - tăng góc né tránh
+                if is_parked_vehicle:
+                    avoidance_steering *= 1.5  # Tăng góc né tránh cho xe đỗ
+                
+                # Giảm né tránh cho người đi bộ cắt ngang - ưu tiên dừng lại
+                if is_crossing_pedestrian:
+                    avoidance_steering *= 0.7  # Giảm né tránh cho người đi bộ
                 
                 # Record avoidance_bias for debugging
                 avoidance_bias = avoidance_direction * intensity
@@ -1163,18 +1210,31 @@ class LaneKeepingLogic(AutonomousLogic):
             # Scale emergency braking by certainty and emergency_blend
             emergency_factor = certainty * emergency_blend
             
+            # Tăng cường phanh khi có người đi bộ đang sang đường
+            is_crossing_pedestrian = obstacle_info and obstacle_info.get('is_crossing_pedestrian', False)
+            is_parked_vehicle = obstacle_info and obstacle_info.get('is_parked_vehicle', False)
+            
             # Progressive speed reduction based on obstacle distance and emergency level
-            if distance_to_obstacle < 5.0:
+            if distance_to_obstacle < 8.0:  # Tăng từ 5.0 lên 8.0
                 # Very close obstacle - almost stop
-                target_speed = 0.5 + (1.0 - emergency_factor) * 2.0
-            elif distance_to_obstacle < 10.0:
+                target_speed = 0.0  # Dừng hoàn toàn
+            elif distance_to_obstacle < 15.0:  # Tăng từ 10.0 lên 15.0
                 # Close obstacle - slow down significantly
-                target_speed = 2.0 + (1.0 - emergency_factor) * 4.0
+                base_speed = 1.0 + (1.0 - emergency_factor) * 2.0
+                # Dừng lại hoàn toàn khi người đi bộ cắt ngang ở gần
+                if is_crossing_pedestrian and distance_to_obstacle < 12.0:
+                    target_speed = 0.0
+                else:
+                    target_speed = base_speed
             else:
                 # Distant obstacle but still emergency - moderate slowdown
                 # Allow higher speeds for less certain detections
                 certainty_factor = min(1.0, certainty + 0.3)  # Bias toward caution
-                target_speed = max(5.0, self.target_speed * (1.0 - certainty_factor * 0.5))
+                if is_crossing_pedestrian:
+                    # Giảm tốc mạnh hơn nếu người đi bộ đang cắt ngang
+                    target_speed = max(2.0, self.target_speed * (1.0 - certainty_factor * 0.8))
+                else:
+                    target_speed = max(3.0, self.target_speed * (1.0 - certainty_factor * 0.7))
                 
             # Cap emergency target speed by current speed to prevent acceleration in emergency
             target_speed = min(target_speed, current_speed)
@@ -1198,9 +1258,14 @@ class LaneKeepingLogic(AutonomousLogic):
                 
                 # Cautious around pedestrians, more relaxed around vehicles
                 if obj_type == "PEDESTRIAN":
-                    target_speed *= 0.7  # Slower around pedestrians
-                elif obj_type in ["BICYCLE", "MOTORCYCLE"]:
+                    if is_crossing_pedestrian:
+                        target_speed *= 0.5  # Giảm tốc độ mạnh hơn cho người đi bộ cắt ngang
+                    else:
+                        target_speed *= 0.7  # Slower around pedestrians
+                elif obj_type in ["BICYCLE", "CYCLIST"]:
                     target_speed *= 0.8  # Slower around cycles
+                elif is_parked_vehicle:
+                    target_speed *= 0.8  # Giảm tốc khi đi qua xe đỗ
         
         # Calculate acceleration based on speed error
         speed_error = target_speed - current_speed
@@ -1330,27 +1395,27 @@ class LaneKeepingLogic(AutonomousLogic):
         
         # Enhanced detection parameters
         # 1. Immediate detection zone (narrower but longer)
-        immediate_zone_width = vehicle_dimensions[1] * 2.0
-        immediate_zone_length = vehicle_dimensions[0] * 10.0
+        immediate_zone_width = vehicle_dimensions[1] * 2.5  # Tăng từ 2.0 lên 2.5
+        immediate_zone_length = vehicle_dimensions[0] * 12.0  # Tăng từ 10.0 lên 12.0
         
         # 2. Forward detection zone (wider but shorter)
-        forward_zone_width = vehicle_dimensions[1] * 3.5
-        forward_zone_length = vehicle_dimensions[0] * 18.0
+        forward_zone_width = vehicle_dimensions[1] * 4.0  # Tăng từ 3.5 lên 4.0
+        forward_zone_length = vehicle_dimensions[0] * 20.0  # Tăng từ 18.0 lên 20.0
         
         # 3. Extended awareness zone (widest but with diminishing importance)
-        awareness_zone_width = vehicle_dimensions[1] * 4.5
-        awareness_zone_length = vehicle_dimensions[0] * 30.0
+        awareness_zone_width = vehicle_dimensions[1] * 5.5  # Tăng từ 4.5 lên 5.5
+        awareness_zone_length = vehicle_dimensions[0] * 35.0  # Tăng từ 30.0 lên 35.0
         
         # Keep track of priority obstacles
         priority_obstacles = []
         
         # Object type weights for priority calculation
         object_type_weights = {
-            'PEDESTRIAN': 2.5,    # Highest priority - vulnerable and unpredictable
-            'CYCLIST': 2.0,       # High priority - vulnerable
-            'TRICAR': 1.5,        # Medium-high priority
-            'CAR': 1.2,           # Medium priority
-            'TRUCK': 1.0          # Base priority (but physically larger)
+            'PEDESTRIAN': 3.0,    # Tăng từ 2.5 lên 3.0
+            'CYCLIST': 2.5,       # Tăng từ 2.0 lên 2.5
+            'TRICAR': 1.5,        # Giữ nguyên
+            'CAR': 1.2,           # Giữ nguyên
+            'TRUCK': 1.0          # Giữ nguyên
         }
         
         # Initialize/update velocity history if needed
@@ -1444,6 +1509,28 @@ class LaneKeepingLogic(AutonomousLogic):
                     is_moving_toward_vehicle = False
                     collision_risk = 0
                     
+                    # Xác định xem đây có phải là xe đỗ không
+                    is_parked_vehicle = obj_speed < 0.05
+                    
+                    # Xác định xem đây có phải là người đi bộ đang cắt ngang đường không
+                    is_crossing_pedestrian = False
+                    if obj_type_name == 'PEDESTRIAN' and obj_speed > 0.2:
+                        # Tính góc giữa hướng di chuyển của người đi bộ và đường
+                        if abs(rel_pos[1]) < forward_zone_width and abs(rel_pos[0]) < forward_zone_length:
+                            # Người đi bộ ở gần đường
+                            if hasattr(self, 'road_start') and hasattr(self, 'road_end'):
+                                road_dir = self.road_end - self.road_start
+                                road_dir = road_dir / np.linalg.norm(road_dir)
+                                ped_dir = obj_velocity / obj_speed
+                                
+                                # Tính góc giữa hướng đi của người đi bộ và đường
+                                crossing_angle = np.arccos(np.clip(np.dot(road_dir[:2], ped_dir[:2]), -1.0, 1.0))
+                                
+                                # Nếu người đi bộ di chuyển vuông góc với đường
+                                if abs(crossing_angle - np.pi/2) < np.pi/4:  # Trong khoảng 45 độ so với vuông góc
+                                    is_crossing_pedestrian = True
+                                    collision_risk = 0.8  # Đặt mức độ nguy hiểm cao cho người đi bộ cắt ngang
+                    
                     if obj_speed > 0.2:  # Only consider moving objects
                         # Calculate object's heading
                         obj_heading = np.arctan2(obj_velocity[1], obj_velocity[0])
@@ -1513,7 +1600,10 @@ class LaneKeepingLogic(AutonomousLogic):
                         'priority': priority_score,
                         'is_moving_toward_vehicle': is_moving_toward_vehicle,
                         'collision_risk': collision_risk,
-                        'predicted_path': self.velocity_history.get(obj_id, {}).get('predicted_path', [])
+                        'predicted_path': self.velocity_history.get(obj_id, {}).get('predicted_path', []),
+                        'is_parked_vehicle': is_parked_vehicle,
+                        'is_crossing_pedestrian': is_crossing_pedestrian,
+                        'speed': obj_speed
                     }
                     
                     # Add to priority list
