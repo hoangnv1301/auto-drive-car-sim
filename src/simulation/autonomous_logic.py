@@ -1,5 +1,6 @@
 import numpy as np
 import math
+import time
 
 class AutonomousLogic:
     """Base class for autonomous driving logic."""
@@ -53,7 +54,7 @@ class LaneKeepingLogic(AutonomousLogic):
         self.lane_change_smoothness = 0.4  # Increased for smoother lane transitions
         
         # Speed related parameters
-        self.target_speed = 5.0  # Reduced from 6.0 for better stability
+        self.target_speed = 3.0  # Reduced from 5.0 for better stability
         self.speed_smoothing = 0.9
         
         # Lookahead parameters
@@ -75,14 +76,14 @@ class LaneKeepingLogic(AutonomousLogic):
         self.pid_max_error_sum = 1.5  # Reduced from 2.0 - lower integral windup limit
         self.last_error = 0.0
         self.last_derivative = 0.0
-        self.derivative_smoothing = 0.9  # Increased from 0.8 for stronger smoothing of derivative
+        self.derivative_smoothing = 0.7  # Increased from 0.8 for stronger smoothing of derivative
         self.prev_pid_steering = 0.0  # Add variable for exponential moving average filter
         
         # Oscillation detection and prevention
         self.oscillation_detection_window = 10
         self.steering_direction_changes = 0
         self.previous_steering_direction = None
-        self.direction_change_damping = 3.5  # Increased from 3.0 for stronger damping on direction changes
+        self.direction_change_damping = 1.5  # Increased from 3.0 for stronger damping on direction changes
         self.oscillation_detected_counter = 0
         self.oscillation_recovery_limit = 10
         
@@ -97,8 +98,7 @@ class LaneKeepingLogic(AutonomousLogic):
         self.max_deceleration = 5.0
         self.lookahead_base = 12.0  # Increased from 10.0 for better anticipation
         self.max_steering_angle = 0.7
-        self.max_steering = 0.7
-        self.steering_smoothing = 0.9  # Increased from 0.8 for much smoother steering
+        self.max_steering = 0.5  # Maximum steering wheel rotation in radians
         self.previous_steering = 0.0
         
         # Add a steering history array for stronger filtering
@@ -107,7 +107,7 @@ class LaneKeepingLogic(AutonomousLogic):
         
         # Lane keeping parameters
         self.target_lane_offset = 2.5  # Positive = target right lane, negative = target left lane
-        self.lane_keeping_factor = 0.6  # Reduced from 0.8 to make lane corrections less aggressive
+        self.lane_keeping_factor = 0.08  # How strongly to keep in lane
         self.curve_following_factor = 0.6  # Reduced from 0.8 for smoother curve handling
         self.obstacle_avoidance_factor = 1.5  # Kept same
         self.emergency_steering_factor = 1.8  # Kept same
@@ -118,15 +118,15 @@ class LaneKeepingLogic(AutonomousLogic):
         self.lane_offset = 1.5  # meters, positive is right lane, negative is left lane
         self.lookahead_min = 10.0  # Increased from 8.0 for better anticipation
         self.lookahead_factor = 0.75  # Increased from 0.65 for smoother steering
-        self.steering_gain = 0.5  # Reduced from 0.7 for less responsive but more stable steering
+        self.steering_gain = 0.15  # How quickly to correct steering
         self.max_acceleration = 2.5  # Increased from 2.0 for better acceleration
         self.max_deceleration = 4.5  # Increased from 4.0 for stronger braking
         self.straight_road_speed_boost = 1.05
         
         # Road parameters - note, will be replaced with data from scene
         # For now, keeping variables for backward compatibility
-        self.road_width = 10.0
-        self.road_length = 200.0
+        self.road_width = road_network.width
+        self.road_length = np.linalg.norm(road_network.end - road_network.start)
         self.curve_start = 50.0
         self.curve_intensity = 0.005
         self.driving_side = "right"  # or "left"
@@ -164,7 +164,7 @@ class LaneKeepingLogic(AutonomousLogic):
         self.previous_steering = 0.0
         self.max_steering_angle = 0.45  # Increased from 0.4 for more steering range
         self.warning_distance = 3.0  # meters
-        self.collision_threshold = 0.1  # meters
+        self.collision_threshold = 12.0  # Distance to start collision avoidance
         self.emergency_braking_factor = 0.7  # Reduced from 0.8 for less aggressive braking
         self.min_emergency_speed = 1.0  # Increased from 0.2 for better maneuverability
         self.mode = "NORMAL"
@@ -174,7 +174,7 @@ class LaneKeepingLogic(AutonomousLogic):
         self.braking_intensity = 0.9  # Reduced from 1.0 for smoother braking
         self.in_curve = False
         self.curve_detection_threshold = 0.08  # Reduced from 0.1 for smoother curve detection
-        self.max_steering = 0.7  # Add the missing attribute
+        self.max_steering = 0.5  # Maximum steering wheel rotation in radians
         
         # PID controller parameters for lane keeping
         self.pid_kp = 0.3  # Reduced from 0.5 - less aggressive proportional response
@@ -213,14 +213,16 @@ class LaneKeepingLogic(AutonomousLogic):
         # Linear interpolation for curved road
         y = curve_t * self.curve_intensity * self.road_length
         
-        # Print debug info periodically
-        if hasattr(self, 'frame_counter') and self.frame_counter % 100 == 0:
+        # Reduce debug logging - only print every 1000 frames instead of 100
+        if hasattr(self, 'frame_counter') and self.frame_counter % 1000 == 0 and self.debug:
             print(f"\n=== ROAD CURVE DEBUG INFO ===")
             print(f"Road params: length={self.road_length}, curve_start={self.curve_start}, intensity={self.curve_intensity}")
             print(f"Position x={x_position}, curve_t={curve_t}, calculated y={y}")
             print(f"==============================\n")
+        
+        if hasattr(self, 'frame_counter'):
             self.frame_counter += 1
-        elif not hasattr(self, 'frame_counter'):
+        else:
             self.frame_counter = 0
         
         return y
@@ -288,10 +290,19 @@ class LaneKeepingLogic(AutonomousLogic):
         if 'road_length' in scene_data:
             self.road_length = scene_data['road_length']
         
+        # Debug print control - only print every 300 frames
+        should_debug_print = False
+        if not hasattr(self, 'road_debug_counter'):
+            self.road_debug_counter = 0
+        self.road_debug_counter += 1
+        if self.road_debug_counter % 300 == 0:
+            should_debug_print = True
+        
         # FOR DEBUGGING - force print road parameters
-        print(f"\n===== ROAD PARAMS DEBUG =====")
-        print(f"Before processing: road_width={self.road_width}, road_length={self.road_length}")
-        print(f"curve_start={self.curve_start}, curve_intensity={self.curve_intensity}")
+        if should_debug_print:
+            print(f"\n===== ROAD PARAMS DEBUG =====")
+            print(f"Before processing: road_width={self.road_width}, road_length={self.road_length}")
+            print(f"curve_start={self.curve_start}, curve_intensity={self.curve_intensity}")
         
         # Extract curve parameters and road data ONCE
         road_network = scene_data.get('road_network', None)
@@ -302,46 +313,55 @@ class LaneKeepingLogic(AutonomousLogic):
         if road_network and 'roads' in road_network and len(road_network['roads']) > 0:
             # Store the road parameters directly from the scene data
             first_road = road_network['roads'][0]
-            print(f"Road data: {first_road}")
+            if should_debug_print:
+                print(f"Road data: {first_road}")
             
             # Update road width if available
             if 'width' in first_road:
                 self.road_width = first_road['width']
-                print(f"Setting road_width to {self.road_width}")
+                if should_debug_print:
+                    print(f"Setting road_width to {self.road_width}")
                 
             # Extract start and end points
             if 'start' in first_road and 'end' in first_road:
                 start = np.array(first_road['start'])
                 end = np.array(first_road['end'])
-                print(f"Road start: {start}, end: {end}")
+                if should_debug_print:
+                    print(f"Road start: {start}, end: {end}")
                 
                 # Calculate road length
                 road_vec = end - start
                 self.road_length = np.linalg.norm(road_vec)
-                print(f"Setting road_length to {self.road_length}")
+                if should_debug_print:
+                    print(f"Setting road_length to {self.road_length}")
                 
                 # Calculate road angle/heading
                 road_dir = road_vec / self.road_length
                 road_angle = np.arctan2(road_dir[1], road_dir[0]) if 'road_dir' in locals() else np.arctan2(end[1] - start[1], end[0] - start[0])
-                print(f"Road angle: {road_angle}")
+                if should_debug_print:
+                    print(f"Road angle: {road_angle}")
                 
                 # CRITICAL SECTION: Determine if this is a curved road
                 if abs(end[1] - start[1]) > 0.1:
-                    print(f"CURVED ROAD DETECTED: y-diff = {abs(end[1] - start[1])}")
+                    if should_debug_print:
+                        print(f"CURVED ROAD DETECTED: y-diff = {abs(end[1] - start[1])}")
                     # This is a curved road
                     self.curve_start = 0  # Start curve immediately
                     # Calculate curve intensity
                     self.curve_intensity = abs(end[1] - start[1]) / self.road_length
-                    print(f"Setting curve_start=0, curve_intensity={self.curve_intensity}")
+                    if should_debug_print:
+                        print(f"Setting curve_start=0, curve_intensity={self.curve_intensity}")
                     
                     # Store road endpoints for lane calculation
                     self.road_start = start
                     self.road_end = end
                 else:
-                    print("STRAIGHT ROAD DETECTED")
+                    if should_debug_print:
+                        print("STRAIGHT ROAD DETECTED")
                     self.curve_start = self.road_length  # No curve
                     self.curve_intensity = 0
-                    print(f"Setting curve_start={self.road_length}, curve_intensity=0")
+                    if should_debug_print:
+                        print(f"Setting curve_start={self.road_length}, curve_intensity=0")
                 
             # Find the current road segment the vehicle is on
             current_road = first_road  # Default to first road
@@ -364,7 +384,8 @@ class LaneKeepingLogic(AutonomousLogic):
                     
                     if distance <= road['width'] * 1.5:  # Allow some margin
                         current_road = road
-                        print(f"Vehicle on road segment: {road}")
+                        if should_debug_print:
+                            print(f"Vehicle on road segment: {road}")
                         break
             
             # Calculate lane center based on the current road
@@ -403,17 +424,20 @@ class LaneKeepingLogic(AutonomousLogic):
                 lane_center_point = np.array([current_x, interpolated_y, 0]) + lateral_dir * lane_offset
                 
                 lane_center_y = lane_center_point[1]
-                print(f"Calculated lane_center_y = {lane_center_y}")
+                if should_debug_print:
+                    print(f"Calculated lane_center_y = {lane_center_y}")
         
         # DEBUGGING - After processing road network
-        print(f"After processing: road_width={self.road_width}, road_length={self.road_length}")
-        print(f"curve_start={self.curve_start}, curve_intensity={self.curve_intensity}")
-        print(f"===== END ROAD PARAMS DEBUG =====\n")
+        if should_debug_print:
+            print(f"After processing: road_width={self.road_width}, road_length={self.road_length}")
+            print(f"curve_start={self.curve_start}, curve_intensity={self.curve_intensity}")
+            print(f"===== END ROAD PARAMS DEBUG =====\n")
         
         # If road network processing didn't yield a lane center, fallback to original calculation
         if lane_center_y is None:
             lane_center_y = self.calculate_lane_center(current_x)
-            print(f"Using fallback lane_center_y = {lane_center_y}")
+            if should_debug_print:
+                print(f"Using fallback lane_center_y = {lane_center_y}")
         
         # Check if we're approaching a curve
         curves_ahead = False
@@ -750,7 +774,10 @@ class LaneKeepingLogic(AutonomousLogic):
         acceleration = speed_result["acceleration"]
         
         # Print debug information
-        self._print_debug_info(data, steering_angle, target_speed, is_emergency)
+        self._print_debug_info(vehicle, scene_data, {
+            'steering': steering_angle,
+            'acceleration': acceleration
+        }, road_info)
         
         # Return control commands
         return {
@@ -846,7 +873,7 @@ class LaneKeepingLogic(AutonomousLogic):
             avoidance_direction = data.get("avoidance_direction", 0)
             
             # Calculate avoidance steering (smooth and proportional)
-            max_avoidance_angle = 0.6  # Maximum steering angle for avoidance
+            max_avoidance_angle = 0.2  # Maximum steering angle for avoidance
             avoidance_steering = avoidance_direction * intensity * max_avoidance_angle
             
             # Record avoidance_bias for debugging
@@ -975,53 +1002,86 @@ class LaneKeepingLogic(AutonomousLogic):
             "acceleration": acceleration
         }
 
-    def _print_debug_info(self, data, steering_angle, target_speed, emergency):
-        """Print debug information about vehicle state and control decisions."""
-        # Get basic vehicle data
-        vehicle = data["vehicle"]
-        current_speed = data.get("current_speed", 0)
-        lane_position = data.get("lane_position", "UNKNOWN")
-        lane_position_value = data.get("lane_position_value", 0)
-        left_edge = data.get("left_edge", 0)
-        right_edge = data.get("right_edge", 0)
-        emergency_blend = data.get("emergency_blend", 0)
+    def _print_debug_info(self, vehicle, scene_data, control_output, road_info=None):
+        """Print debug information about the vehicle's state and control decisions.
+        Only print a small fraction of the time to reduce performance impact."""
+        current_time = time.time()
         
-        # Determine vehicle mode based on emergency blend
-        if emergency_blend > 0.6:
-            mode = "EMERGENCY MODE"
-        elif emergency_blend > 0.25:
-            mode = "CAUTION MODE"
-        else:
-            mode = "NORMAL"
+        # Only print debug info every 3 seconds instead of 1 second
+        if not hasattr(self, 'last_debug_time') or current_time - self.last_debug_time > 3.0:
+            self.last_debug_time = current_time
             
-        # Create debug info dictionary
-        debug_info = {
-            'mode': mode,
-            'heading': round(vehicle['rotation'][2], 2),
-            'lane_position': lane_position + f" with {abs(round(lane_position_value, 1))}m offset",
-            'left_edge': round(left_edge, 2),
-            'right_edge': round(right_edge, 2),
-            'current_speed': round(current_speed, 2),
-            'target_speed': round(target_speed, 2),
-            'steering_angle': round(steering_angle, 2),
-            'direction': "LEFT" if steering_angle < 0 else "RIGHT",
-        }
-        
-        # Add obstacle information if present
-        if data.get("has_obstacles", False):
-            debug_info['obstacle_distance'] = round(data.get("distance_to_obstacle", 0), 2)
-            if "obstacle_id" in data and data["obstacle_id"] is not None:
-                debug_info['obstacle_id'] = data["obstacle_id"]
-            if "avoidance_bias" in data:
-                debug_info['avoidance_bias'] = round(data.get("avoidance_bias", 0), 2)
-        
-        # Print debug information
-        debug_string = "\n--- VEHICLE CONTROL DEBUG ---\n"
-        for key, value in debug_info.items():
-            debug_string += f"{key}: {value}\n"
-        debug_string += "-----------------------------\n"
-        print(debug_string)
+            # Print vehicle data less frequently
+            debug_counter = getattr(self, 'debug_counter', 0) + 1
+            setattr(self, 'debug_counter', debug_counter)
+            
+            if debug_counter % 10 == 0:  # Print vehicle data very infrequently
+                # Tính vận tốc từ vector vận tốc
+                vehicle_speed = np.linalg.norm(vehicle['velocity']) if 'velocity' in vehicle else 0.0
+                
+                print("\n===== VEHICLE CONTROL DEBUG =====")
+                print(f"Current Speed: {vehicle_speed:.2f} m/s, Target Speed: {self.target_speed:.2f} m/s")
+                print(f"Current Y: {vehicle['position'][1]:.2f}, Lane Center: {road_info['lane_center_y'] if road_info else 'N/A':.2f}")
+                print(f"Lane Deviation: {abs(vehicle['position'][1] - (road_info['lane_center_y'] if road_info else 0)):.2f} m")
+                print(f"Emergency Mode: {self.emergency_mode}")
+                print(f"Distance to Obstacle: {self.distance_to_obstacle:.2f} m" if hasattr(self, 'distance_to_obstacle') else "No obstacle detected")
+                
+                print(f"Steering Output: {control_output['steering']:.4f}, Throttle Output: {control_output['acceleration']:.2f}")
+                # Kiểm tra nếu có giá trị phanh
+                if 'brake' in control_output:
+                    print(f"Brake Output: {control_output['brake']:.2f}")
+                else:
+                    print(f"Brake Output: 0.00")
+                print("===== END VEHICLE CONTROL DEBUG =====\n")
+                
+            if debug_counter % 5 == 0:  # Print steering wheel display less frequently
+                self._print_steering_wheel_display(control_output['steering'])
 
+    def _print_steering_wheel_display(self, steering_angle):
+        """Display a visual representation of the steering wheel position.
+        
+        Args:
+            steering_angle: The current steering angle in radians
+        """
+        # Convert steering angle to degrees for display
+        angle_degrees = math.degrees(steering_angle)
+        
+        # Determine direction
+        direction = "RIGHT" if angle_degrees > 0 else "LEFT"
+        abs_angle = abs(angle_degrees)
+        
+        # Calculate percentage of maximum steering
+        max_angle_deg = math.degrees(self.max_steering_angle)
+        percentage = int(min(100, abs_angle / max_angle_deg * 100))
+        
+        # Create position indicator
+        indicator_pos = int(percentage / 10)  # 0-10 position
+        
+        # Create the steering wheel display
+        print("\n====== STEERING WHEEL DISPLAY ======")
+        print(f"Direction: {direction} ({abs_angle:.1f}°) - {percentage}% of max")
+        
+        # Draw the steering wheel
+        print("L    -    |    -    R")
+        
+        # Position indicator
+        if direction == "RIGHT":
+            indicator = " " * (12 + indicator_pos) + "▶" + " " * (10 - indicator_pos)
+        else:
+            indicator = " " * (12 - indicator_pos) + "◀" + " " * (10 + indicator_pos)
+        print(indicator)
+        
+        # Draw the base line
+        print("═" * 33)
+        
+        # Draw direction arrows
+        num_arrows = int(percentage / 5)  # 1 arrow for every 5%
+        if direction == "RIGHT":
+            arrows = " " * (18 - num_arrows) + "→" * num_arrows
+        else:
+            arrows = " " * (14) + "←" * num_arrows
+        print(arrows)
+        
     def _calculate_relative_position(self, vehicle, obj):
         """Calculate the position of obj relative to vehicle in vehicle's coordinate frame."""
         # Get positions
