@@ -13,6 +13,13 @@ class AutonomousLogic:
         self.max_acceleration = 3.0  # m/s^2
         self.max_deceleration = 5.0  # m/s^2
         self.max_steering_angle = 0.5  # radians
+        self._prev_position = None
+        self._prev_steering = None  # Store previous steering angle for rate limiting
+        self._last_debug = {
+            "lane": {},
+            "steering": {},
+            "speed": {}
+        }
     
     def process(self, vehicle, scene_data):
         """Process the current scene and return control commands.
@@ -66,6 +73,7 @@ class LaneKeepingLogic(AutonomousLogic):
         self.curve_adjustment = 3.0  # Reduced from 4.0
         self.curve_speed_reduction = 0.7  # How much to slow down in curves
         self.curve_transition_smoothing = 0.95  # Increased from 0.9
+        self.curve_response = 0.8  # How strongly to respond to curves (higher = more response)
         
         # PID controller for lane tracking
         self.pid_kp = 0.2  # Reduced from 0.25 - lower proportional gain for less aggressive response
@@ -281,10 +289,24 @@ class LaneKeepingLogic(AutonomousLogic):
             
         return target_y
     
-    def _get_road_info(self, vehicle, scene_data):
-        """Get information about the road and vehicle position."""
-        current_x = vehicle['position'][0]
-        current_y = vehicle['position'][1]
+    def _get_road_info(self, position, scene_data):
+        """Get information about the road and vehicle position.
+        
+        Args:
+            position: The position to get road info for (can be a numpy array or a vehicle dictionary)
+            scene_data: The scene data
+            
+        Returns:
+            dict: Road information
+        """
+        # Handle either a position array or a vehicle dictionary
+        if isinstance(position, dict) and 'position' in position:
+            current_x = position['position'][0]
+            current_y = position['position'][1]
+        else:
+            # Assume position is a numpy array or list
+            current_x = position[0]
+            current_y = position[1]
         
         # Always update road parameters from scene_data if available
         if 'road_width' in scene_data:
@@ -469,19 +491,98 @@ class LaneKeepingLogic(AutonomousLogic):
         }
     
     def process(self, vehicle, scene_data):
-        """Process the current scene and return control commands.
+        """Process the current scene data to generate control commands.
         
         Args:
             vehicle (dict): The vehicle to control
-            scene_data (dict): Current scene data
+            scene_data (dict): The current scene data
             
         Returns:
-            dict: Control commands (acceleration, steering)
+            dict: Control commands
         """
-        # Package data
+        # Create a combined scene_data if it doesn't already have the vehicle
+        if 'ego_vehicle' not in scene_data:
+            scene_data = scene_data.copy()
+            scene_data['ego_vehicle'] = vehicle
+            
+        # Package together vehicle and scene data
+        dt = scene_data.get('dt', 0.033)  # Default to 33ms if not provided
+        
+        # Calculate current position
+        current_pos = vehicle['position']
+        
+        # Extract some useful properties
+        vehicle_heading = vehicle['rotation'][2]  # Yaw in radians
+        vehicle_velocity = vehicle.get('velocity', [0, 0, 0])
+        current_speed = math.sqrt(vehicle_velocity[0]**2 + vehicle_velocity[1]**2)  # In m/s
+        
+        # Get road information if available
+        road = scene_data.get('road', None)
+        road_width = 8.0  # Default road width if not available
+        if road is not None and 'width' in road:
+            road_width = road['width']
+        
+        # Check for obstacles using our _check_for_obstacles method
+        all_objects = scene_data.get('objects', [])
+        has_obstacles, closest_obstacle, distance_to_obstacle, obstacle_info = self._check_for_obstacles(
+            current_pos, vehicle_heading, vehicle['dimensions'], all_objects, vehicle['id'], None
+        )
+        
+        # Calculate safe distance for avoiding obstacles
+        # Larger margins for higher speeds
+        safe_distance = self.collision_threshold * (1.0 + 0.5 * min(1.0, current_speed / 10.0))
+        
+        # Determine left-right position in lane
+        lane_pos = 0.0  # 0 = center, -1 = left edge, 1 = right edge
+        
+        # Get lane position from localization if available
+        if 'localization' in scene_data and 'lane_position' in scene_data['localization']:
+            lane_pos = scene_data['localization']['lane_position']
+        
+        # Initialize enhanced avoidance data with more detailed information
+        avoidance_data = {
+            "has_obstacles": has_obstacles,
+            "closest_obstacle": closest_obstacle,
+            "distance_to_obstacle": distance_to_obstacle,
+            "obstacle_info": obstacle_info,
+            "safe_distance": safe_distance,
+            "lane_position": lane_pos,
+            "avoidance_direction": 0  # Default: no avoidance
+        }
+        
+        # If we have obstacles, determine avoidance direction with improved logic
+        if has_obstacles and closest_obstacle is not None:
+            # Get the relative position to determine which way to steer
+            rel_pos = self._calculate_relative_position(vehicle, closest_obstacle)
+            
+            # Add relative position to obstacle info for enhanced processing
+            if obstacle_info is None:
+                obstacle_info = {}
+            obstacle_info['rel_pos'] = rel_pos
+            avoidance_data["obstacle_info"] = obstacle_info
+            
+            # If obstacle is directly ahead, use lane position to decide direction
+            if abs(rel_pos[1]) < vehicle['dimensions'][1] * 0.7:  # Increased from 0.5 for earlier response
+                # If we're left of center, go right and vice versa
+                avoidance_data["avoidance_direction"] = -1 if lane_pos < 0 else 1
+            else:
+                # Otherwise avoid based on obstacle position (opposite direction)
+                avoidance_data["avoidance_direction"] = -1 if rel_pos[1] > 0 else 1
+            
+            # Check road edges to ensure we don't go off road
+            # If already near edge, override to avoid going off road
+            if lane_pos > 0.7 and avoidance_data["avoidance_direction"] > 0:
+                # Too close to right edge, force left
+                avoidance_data["avoidance_direction"] = -1
+            elif lane_pos < -0.7 and avoidance_data["avoidance_direction"] < 0:
+                # Too close to left edge, force right
+                avoidance_data["avoidance_direction"] = 1
+        
+        # Package data with the enhanced avoidance data
         data = {
             "vehicle": vehicle,
-            "scene": scene_data
+            "scene": scene_data,
+            "avoidance_data": avoidance_data  # Package enhanced avoidance data
         }
         
         # Get key vehicle properties
@@ -492,7 +593,7 @@ class LaneKeepingLogic(AutonomousLogic):
         current_speed = self._calculate_speed(vehicle)
         
         # Create road information
-        road_info = self._get_road_info(vehicle, scene_data)
+        road_info = self._get_road_info(current_pos, scene_data)
         lane_center_y = road_info["lane_center_y"]  # Use the improved lane center
         
         # Create a simplified segment representation
@@ -526,18 +627,6 @@ class LaneKeepingLogic(AutonomousLogic):
         # Target position with lane offset
         target_position = segment['center'] + perpendicular * lane_offset
         
-        # Check for obstacles using our _check_for_obstacles method
-        all_objects = scene_data.get('objects', [])
-        has_obstacles, closest_obstacle, distance_to_obstacle = self._check_for_obstacles(
-            current_pos, vehicle_heading, vehicle['dimensions'], all_objects, vehicle['id'], None
-        )
-        
-        # Calculate safe distance for obstacle avoidance
-        safe_distance = 2.0
-        if has_obstacles and closest_obstacle is not None:
-            # Increase safe distance for better obstacle avoidance
-            safe_distance = 2.5 * (vehicle['dimensions'][0] + closest_obstacle.get('dimensions', [4.0, 2.0, 1.5])[0])
-        
         # Calculate relative lane position for debugging
         lane_position = "CENTER"
         lane_position_value = 0.0
@@ -560,42 +649,13 @@ class LaneKeepingLogic(AutonomousLogic):
         # IMPROVEMENT: Check if vehicle is near the edge of the road - if so, prioritize return to lane
         near_edge = left_edge < 1.0 or right_edge < 1.0
         
-        # IMPROVEMENT: Calculate avoidance direction based on obstacle and road position
-        avoidance_direction = 0
-        if has_obstacles and closest_obstacle is not None:
-            # Calculate relative position of obstacle
-            rel_pos = self._calculate_relative_position(vehicle, closest_obstacle)
-            
-            # Determine direction to steer (positive = right, negative = left)
-            # Add hysteresis to avoid rapid direction changes
-            if not hasattr(self, 'last_avoidance_direction'):
-                self.last_avoidance_direction = 0
-                
-            # Make avoidance direction proportional to obstacle's relative position with temporal smoothing
-            avoidance_factor = min(1.0, abs(rel_pos[1]) / 5.0)  # Normalize by 5m distance
-            raw_direction = -avoidance_factor if rel_pos[1] >= 0 else avoidance_factor
-            
-            # Apply stronger temporal smoothing (60% new direction, 40% previous direction) for better stability
-            # This prevents rapid direction changes that cause zigzagging
-            avoidance_direction = 0.6 * raw_direction + 0.4 * self.last_avoidance_direction
-            
-            # Apply direction change threshold to prevent small oscillations
-            # Only change direction if the new direction differs significantly
-            if abs(avoidance_direction - self.last_avoidance_direction) < 0.15:
-                avoidance_direction = self.last_avoidance_direction
-                
-            self.last_avoidance_direction = avoidance_direction
-            
-            # But if near edge, prioritize avoiding the edge over avoiding the obstacle
-            if near_edge:
-                if left_edge < 1.0:  # Near left edge, prefer right turns
-                    avoidance_direction = 1
-                elif right_edge < 1.0:  # Near right edge, prefer left turns
-                    avoidance_direction = -1
+        # Update lane position in avoidance data for better decision making
+        avoidance_data["lane_position"] = projection / (lane_width * 0.5)  # Normalized -1 to 1
         
-        # Check if we're on a curved road
-        is_curved_road = self.curve_intensity > 0.01
+        # Check for curves in the road
+        is_curved_road = road_info.get('curves_ahead', False)
         
+        # Calculate steering angle for normal driving (lane keeping logic)
         # Adjust lookahead distance based on speed and curve conditions
         if is_curved_road:
             # Shorter lookahead on curves for better curve tracking
@@ -704,98 +764,192 @@ class LaneKeepingLogic(AutonomousLogic):
                            pure_pursuit_weight * pure_pursuit_steering)
         
         # Add curve adjustment - stronger for higher curve intensity
-        curve_adjustment = 0
+        curve_adjustment = 0.0
         if is_curved_road:
-            # Direction of the curve (positive = right curve, negative = left curve)
-            curve_direction = np.sign(self.road_end[1] - self.road_start[1]) if hasattr(self, 'road_end') else 0
+            # Calculate curve adjustment based on curvature
+            curve_adjustment = road_info['curve_angle'] * self.curve_response
+            # Scale down for higher speeds
+            curve_adjustment *= max(0.5, 1.0 - current_speed / 15.0)
             
-            # Adjust based on curve intensity and current deviation
-            # Reduced factor from 4.0 to 3.0 for smoother curve following
-            curve_adjustment = curve_direction * self.curve_intensity * self.curve_following_factor * 3.0
-            
-            # Apply stronger smoothing
-            if not hasattr(self, 'prev_curve_adjustment'):
-                self.prev_curve_adjustment = 0
-            
-            # Increased smoothing factor to 0.9 (from 0.8) for even smoother curve transitions
-            curve_adjustment = 0.9 * self.prev_curve_adjustment + 0.1 * curve_adjustment
-            self.prev_curve_adjustment = curve_adjustment
-            
-            # Apply exponential curve adjustment to prevent rapid changes
-            # This creates a more gradual application of curve steering
-            curve_adjustment_sign = 1 if curve_adjustment > 0 else -1
-            curve_adjustment_mag = abs(curve_adjustment)
-            smoothed_mag = curve_adjustment_mag ** 0.8  # Apply non-linear scaling to smooth changes
-            curve_adjustment = curve_adjustment_sign * smoothed_mag
-        
-        # Add the curve adjustment
+        # Apply curve adjustment
         steering_angle += curve_adjustment
         
-        # Steering debug info is disabled for performance
-        if not hasattr(self, 'steering_debug_counter'):
-            self.steering_debug_counter = 0
-        else:
-            self.steering_debug_counter += 1
+        # Store base steering angle before obstacle avoidance for debugging
+        base_steering = steering_angle
         
-        # Package data for obstacle avoidance
-        data.update({
-            "avoidance_direction": avoidance_direction,
-            "has_obstacles": has_obstacles,
-            "closest_obstacle": closest_obstacle,
-            "distance_to_obstacle": distance_to_obstacle if 'distance_to_obstacle' in locals() else float('inf'),
-            "obstacle_id": 'obstacle_id' in locals() and obstacle_id,
-            "current_steering": steering_angle,
+        # Package avoidance data with the current steering
+        avoidance_data["current_steering"] = steering_angle
+        
+        # Apply obstacle avoidance if needed using improved handler
+        avoidance_result = self._handle_obstacle_avoidance(data, steering_angle)
+        
+        # Check if obstacle avoidance has modified the steering
+        if avoidance_result is not None:
+            steering_angle = avoidance_result["steering_angle"]
+            is_emergency = avoidance_result["is_emergency"]
+            emergency_blend = avoidance_result.get("emergency_blend", 0.0)
+            avoidance_bias = avoidance_result.get("avoidance_bias", 0.0)
+        else:
+            is_emergency = False
+            emergency_blend = 0.0
+            avoidance_bias = 0.0
+        
+        # Apply speed control logic
+        # Calculate target speed - base target speed + adjustments
+        target_speed = self.target_speed
+        
+        # Decrease speed for curves
+        if is_curved_road:
+            # Stronger speed reduction for sharper curves (using curve intensity)
+            curve_speed_factor = max(0.6, 1.0 - self.curve_intensity * 8.0)  # 0.6 to 1.0
+            
+            # More gradual speed reduction for gentle curves
+            target_speed *= curve_speed_factor
+            
+            # Debug the curve speed adjustment
+            if hasattr(self, 'debug_enabled') and self.debug_enabled:
+                print(f"Speed reduced for curve: {curve_speed_factor:.2f} * {self.target_speed:.1f} = {target_speed:.1f}")
+        
+        # Apply speed control logic when approaching obstacles
+        if has_obstacles and distance_to_obstacle < safe_distance * 3.0:
+            # Pack data for speed control
+            data["emergency"] = is_emergency
+            data["obstacle_distance"] = distance_to_obstacle
+            
+            # Use the improved speed control logic
+            speed_control_result = self._handle_speed_control(data, is_emergency)
+            target_speed = speed_control_result.get("target_speed", target_speed)
+        
+        # Apply final speed control
+        speed_error = target_speed - current_speed
+        
+        # Calculate acceleration based on speed error
+        if speed_error > 0:
+            # Accelerate - smooth acceleration curve with reduced intensity
+            acceleration = min(self.max_acceleration, speed_error * 0.8)
+        else:
+            # Brake - more responsive braking, especially in emergency situations
+            base_deceleration = abs(speed_error) * 1.2  # More responsive braking 
+            
+            # Apply stronger braking in emergency with enhanced variable braking force
+            if is_emergency:
+                # Scale braking force by emergency blend
+                emergency_braking = self.max_deceleration * emergency_blend
+                # Combine with base deceleration for a smooth blend
+                acceleration = -max(base_deceleration, emergency_braking)
+            else:
+                acceleration = -min(self.max_deceleration, base_deceleration)
+        
+        # Debug info package
+        debug_info = {
             "lane_position": lane_position,
             "lane_position_value": lane_position_value,
-            "left_edge": left_edge,
-            "right_edge": right_edge,
+            "lane_center_y": lane_center_y,
+            "heading": vehicle_heading,
+            "lane_deviation": lane_deviation,
+            "lane_keeping_weight": lane_keeping_weight,
+            "pure_pursuit_weight": pure_pursuit_weight,
+            "lane_keeping_steering": lane_keeping_steering,
+            "pure_pursuit_steering": pure_pursuit_steering,
+            "has_obstacles": has_obstacles,
+            "distance_to_obstacle": distance_to_obstacle,
+            "is_emergency": is_emergency,
+            "emergency_blend": emergency_blend,
+            "avoidance_bias": avoidance_bias,
+            "base_steering": base_steering,
+            "final_steering": steering_angle,
             "current_speed": current_speed,
-            "is_curved_road": is_curved_road
-        })
+            "target_speed": target_speed,
+            "acceleration": acceleration
+        }
         
-        # Handle obstacle avoidance
-        obstacle_result = self._handle_obstacle_avoidance(data, steering_angle, emergency=False)
-        steering_angle = obstacle_result["steering_angle"]
-        is_emergency = obstacle_result["is_emergency"]
-        
-        # Apply final steering limits
-        steering_angle = np.clip(steering_angle, -self.max_steering, self.max_steering)
-        
-        # Handle speed control
-        speed_result = self._handle_speed_control(data, emergency=is_emergency)
-        target_speed = speed_result["target_speed"]
-        acceleration = speed_result["acceleration"]
-        
-        # Print debug information
-        self._print_debug_info(scene_data)
-        
-        # Return control commands
+        # Return final control commands
         return {
-            'steering': steering_angle,
-            'acceleration': acceleration
+            "acceleration": acceleration,
+            "steering": steering_angle,
+            "debug": debug_info
         }
 
-    def _handle_obstacle_avoidance(self, data, steering_angle, emergency=False):
-        """Handle obstacle avoidance behavior."""
-        # Get vehicle data
-        vehicle = data["vehicle"]
-        scene_data = data["scene"]
+    def _handle_obstacle_avoidance(self, data, steering_angle=None, emergency=False):
+        """Handle obstacle avoidance behavior with improved object type awareness and certainty-based decision making.
         
-        # Extract obstacle information
-        has_obstacles = data.get("has_obstacles", False)
-        closest_obstacle = data.get("closest_obstacle", None)
-        distance_to_obstacle = data.get("distance_to_obstacle", float('inf'))
-        obstacle_id = data.get("obstacle_id", None)
+        Args:
+            data: Dictionary containing vehicle, scene, and obstacle data
+            steering_angle: Current steering angle (if None, will be derived from data)
+            emergency: Flag indicating if we're already in emergency mode
+            
+        Returns:
+            dict: Updated steering and emergency status
+        """
+        # Get vehicle data
+        vehicle = data.get("vehicle", None)
+        if vehicle is None and "avoidance_data" in data:
+            # If using the new avoidance_data format
+            avoidance_data = data["avoidance_data"]
+            # Extract key data from avoidance_data
+            has_obstacles = avoidance_data.get("has_obstacles", False)
+            closest_obstacle = avoidance_data.get("closest_obstacle", None)
+            distance_to_obstacle = avoidance_data.get("distance_to_obstacle", float('inf'))
+            obstacle_info = avoidance_data.get("obstacle_info", None)
+            avoidance_direction = avoidance_data.get("avoidance_direction", 0)
+        else:
+            # Backwards compatibility with old data format
+            has_obstacles = data.get("has_obstacles", False)
+            closest_obstacle = data.get("closest_obstacle", None)
+            distance_to_obstacle = data.get("distance_to_obstacle", float('inf'))
+            obstacle_info = data.get("obstacle_info", None)
+            avoidance_direction = data.get("avoidance_direction", 0)
+            vehicle = data.get("vehicle", None)
+        
+        # Use provided steering angle or extract from data
+        if steering_angle is None:
+            steering_angle = data.get("current_steering", 0.0)
         
         # Initialize emergency state tracking if not present
         if not hasattr(self, 'emergency_blend'):
             self.emergency_blend = 0.0  # 0 = normal, 1 = full emergency
             
-        # Calculate smooth emergency blend factor based on obstacle distance
+        # Calculate smooth emergency blend factor based on obstacle distance and type
         if has_obstacles and closest_obstacle is not None:
-            # Define distance thresholds
-            critical_distance = self.collision_threshold * 0.8
-            safe_distance = self.collision_threshold * 1.5
+            # Get object type with enhanced fallback logic
+            obj_type = "UNKNOWN"
+            if obstacle_info is not None:
+                obj_type = obstacle_info.get('type', "UNKNOWN")
+            elif hasattr(closest_obstacle, 'type') and closest_obstacle.get('type'):
+                obj_type = closest_obstacle['type'] if isinstance(closest_obstacle['type'], str) else closest_obstacle['type'].name
+            
+            # Adjust thresholds based on object type
+            distance_multiplier = 1.0
+            
+            # Vulnerable road users require extra caution
+            if obj_type == 'PEDESTRIAN':
+                distance_multiplier = 1.5  # Give pedestrians more space
+            elif obj_type == 'CYCLIST':
+                distance_multiplier = 1.3  # Give cyclists more space
+            
+            # Define distance thresholds with type-based adjustment
+            critical_distance = self.collision_threshold * 0.8 * distance_multiplier
+            safe_distance = self.collision_threshold * 1.5 * distance_multiplier
+            
+            # Get certainty information if available
+            detection_certainty = 1.0  # Default to full certainty
+            if obstacle_info and 'detection_certainty' in obstacle_info:
+                detection_certainty = obstacle_info['detection_certainty']
+            
+            # Adjust thresholds based on certainty - lower certainty requires earlier reaction
+            if detection_certainty < 0.9:
+                # Increase distances for uncertain detections
+                certainty_factor = max(1.0, 1.5 - 0.5 * detection_certainty)  # 1.0-1.5x based on certainty
+                critical_distance *= certainty_factor
+                safe_distance *= certainty_factor
+            
+            # Adjust for collision risk if available (moving object on collision course)
+            if obstacle_info and obstacle_info.get('is_moving_toward_vehicle', False):
+                collision_risk = obstacle_info.get('collision_risk', 0)
+                # Increase emergency level for potential collisions based on certainty
+                risk_factor = collision_risk * max(0.7, detection_certainty)  # Scale risk by certainty
+                critical_distance *= (1.0 + risk_factor * 0.5)
+                safe_distance *= (1.0 + risk_factor * 0.5)
             
             # Calculate target emergency level based on distance
             if distance_to_obstacle <= critical_distance:
@@ -810,13 +964,26 @@ class LaneKeepingLogic(AutonomousLogic):
                                   (safe_distance - critical_distance))
                 target_emergency = max(0.0, min(1.0, proximity))
             
+            # Adjust target emergency based on object type
+            if obj_type == 'PEDESTRIAN':
+                # More cautious with pedestrians
+                target_emergency = min(1.0, target_emergency * 1.3)
+            elif obj_type == 'CYCLIST':
+                # Also more cautious with cyclists
+                target_emergency = min(1.0, target_emergency * 1.2)
+            
+            # Scale emergency level by certainty
+            target_emergency *= max(0.6, detection_certainty)
+            
             # Gradually approach target emergency level (faster increase, slower decrease)
             if target_emergency > self.emergency_blend:
-                # Quick response to danger
-                self.emergency_blend = min(1.0, self.emergency_blend + max(0.1, (target_emergency - self.emergency_blend) * 0.4))
+                # Quick response to danger - increase speed depends on certainty
+                increase_rate = max(0.1, (target_emergency - self.emergency_blend) * 0.4 * detection_certainty)
+                self.emergency_blend = min(1.0, self.emergency_blend + increase_rate)
             else:
-                # Slower return to normal
-                self.emergency_blend = max(0.0, self.emergency_blend - 0.05)
+                # Slower return to normal - more gradual with lower certainty
+                decrease_rate = 0.05 * min(1.0, 0.5 + 0.5 * detection_certainty)
+                self.emergency_blend = max(0.0, self.emergency_blend - decrease_rate)
         else:
             # No obstacles, gradually reduce emergency level
             self.emergency_blend = max(0.0, self.emergency_blend - 0.05)
@@ -837,156 +1004,229 @@ class LaneKeepingLogic(AutonomousLogic):
         # Only process avoidance if obstacles exist
         if has_obstacles and closest_obstacle is not None:
             # Get relative position between vehicle and obstacle
-            rel_pos = self._calculate_relative_position(vehicle, closest_obstacle)
+            rel_pos = None
             
-            # Calculate relative angle to obstacle
-            rel_angle = np.arctan2(rel_pos[1], rel_pos[0])
+            if vehicle and closest_obstacle:
+                rel_pos = self._calculate_relative_position(vehicle, closest_obstacle)
+            elif obstacle_info and 'rel_pos' in obstacle_info:
+                rel_pos = obstacle_info['rel_pos']
             
-            # Calculate distance to obstacle
-            distance = self._calculate_distance(rel_pos)
-            
-            # Calculate intensity based on distance (closer = stronger response)
-            # Smoother intensity curve with improved response near collision threshold
-            intensity = max(0.0, min(1.0, self.collision_threshold / max(0.1, distance)))
-            
-            # Apply non-linear intensity scale - more responsive at medium distances
-            if distance < self.collision_threshold * 0.5:
-                # Very close - maximum response
-                intensity = 1.0
-            else:
-                # Adjust response curve for medium distances
-                proximity = 1.0 - (distance - self.collision_threshold * 0.5) / (self.collision_threshold * 0.5)
-                intensity = max(0.0, min(1.0, proximity ** 1.5))  # Non-linear curve
-            
-            # Apply smoother avoidance behavior
-            # Get avoidance direction from vehicle data (-1 = left, 1 = right)
-            avoidance_direction = data.get("avoidance_direction", 0)
-            
-            # Calculate avoidance steering (smooth and proportional)
-            max_avoidance_angle = 0.2  # Maximum steering angle for avoidance
-            avoidance_steering = avoidance_direction * intensity * max_avoidance_angle
-            
-            # Record avoidance_bias for debugging
-            avoidance_bias = avoidance_direction * intensity
-            
-            # Apply smoother blending between normal and emergency steering
-            result_steering = (normal_factor * original_steering) + (emergency_factor * avoidance_steering)
-            
-            # Add result to steering history for filtering
-            self.steering_history.append(result_steering)
-            if len(self.steering_history) > self.max_steering_history:
-                self.steering_history.pop(0)
+            if rel_pos is not None:
+                # Calculate relative angle to obstacle
+                rel_angle = np.arctan2(rel_pos[1], rel_pos[0])
                 
-            # Apply weighted moving average filter to smooth steering
-            if len(self.steering_history) >= 5:  # Increased from 3 for more data points
-                # Exponential weights that emphasize recent values but with stronger smoothing
-                if emergency_factor > 0.5:
-                    weights = [0.05, 0.1, 0.15, 0.2, 0.5]  # More responsive in emergency
+                # Calculate distance to obstacle (reuse provided distance if available)
+                distance = distance_to_obstacle if distance_to_obstacle < float('inf') else self._calculate_distance(rel_pos)
+                
+                # Calculate intensity based on distance (closer = stronger response)
+                # Smoother intensity curve with improved response near collision threshold
+                intensity = max(0.0, min(1.0, self.collision_threshold / max(0.1, distance)))
+                
+                # Apply non-linear intensity scale - more responsive at medium distances
+                if distance < self.collision_threshold * 0.5:
+                    # Very close - maximum response
+                    intensity = 1.0
                 else:
-                    weights = [0.05, 0.1, 0.15, 0.3, 0.4]  # More smoothing in normal driving
+                    # Adjust response curve for medium distances
+                    proximity = 1.0 - (distance - self.collision_threshold * 0.5) / (self.collision_threshold * 0.5)
+                    intensity = max(0.0, min(1.0, proximity ** 1.5))  # Non-linear curve
                 
-                # Normalize weights to ensure they sum to 1.0
-                weight_sum = sum(weights)
-                weights = [w/weight_sum for w in weights]
+                # Apply certainty scaling if available
+                if obstacle_info and 'detection_certainty' in obstacle_info:
+                    certainty = obstacle_info['detection_certainty']
+                    # Apply certainty-based scaling that's stronger for closer objects
+                    # For far objects, low certainty reduces intensity more
+                    # For close objects, even low certainty maintains high intensity for safety
+                    certainty_scale = min(1.0, 0.6 + 0.4 * (intensity ** 0.5) + certainty * 0.4)
+                    intensity *= certainty_scale
                 
-                result_steering = sum(w * s for w, s in zip(weights, self.steering_history[-5:]))
-            
-            # Avoid sudden steering changes by limiting change rate
-            if hasattr(self, 'previous_steering'):
-                # Limit steering rate of change (more strict in normal driving)
-                max_change_rate = 0.05 * (1.0 - emergency_factor) + 0.15 * emergency_factor
-                steering_delta = result_steering - self.previous_steering
-                if abs(steering_delta) > max_change_rate:
-                    # Limit the change rate
-                    result_steering = self.previous_steering + np.sign(steering_delta) * max_change_rate
+                # Get avoidance direction from data
+                # Check if using new or old data format
+                if "avoidance_data" in data and "avoidance_direction" in data["avoidance_data"]:
+                    avoidance_direction = data["avoidance_data"]["avoidance_direction"]
+                
+                # Adjust avoidance direction based on predicted path if available
+                if obstacle_info and obstacle_info.get('predicted_path') and obstacle_info.get('is_moving_toward_vehicle'):
+                    # Check if object is predicted to cross our path from left or right
+                    predicted_path = obstacle_info['predicted_path']
+                    prediction_certainty = obstacle_info.get('prediction_certainty', 0.7)  # Default 70% certainty
                     
-            # Save current steering for next iteration
-            self.previous_steering = result_steering
+                    if predicted_path:
+                        # Check the lateral position (y) trend in the prediction
+                        current_y = closest_obstacle['position'][1] if 'position' in closest_obstacle else rel_pos[1]
+                        future_y = predicted_path[-1][1]
+                        
+                        # If object is predicted to move across our path, adjust avoidance direction
+                        if abs(future_y - current_y) > 1.0:  # Significant lateral movement
+                            # Determine which way the object is moving laterally
+                            moving_right = future_y > current_y
+                            
+                            # If moving right, prefer going left and vice versa
+                            preferred_direction = -1 if moving_right else 1
+                            
+                            # Blend with current avoidance direction based on certainty
+                            # Lower certainty = less influence from prediction
+                            time_to_collision = obstacle_info.get('collision_risk', 0) * 5.0  # 0-5 seconds
+                            if time_to_collision < 3.0:  # Only override for imminent collisions
+                                # Stronger influence for close collisions, scaled by prediction certainty
+                                prediction_weight = max(0, 1.0 - time_to_collision / 3.0) * prediction_certainty
+                                avoidance_direction = (1 - prediction_weight) * avoidance_direction + prediction_weight * preferred_direction
+                
+                # Calculate avoidance steering (smooth and proportional)
+                max_avoidance_angle = 0.2  # Maximum steering angle for avoidance
+                avoidance_steering = avoidance_direction * intensity * max_avoidance_angle
+                
+                # Record avoidance_bias for debugging
+                avoidance_bias = avoidance_direction * intensity
+                
+                # Apply smoother blending between normal and emergency steering
+                result_steering = (normal_factor * original_steering) + (emergency_factor * avoidance_steering)
+                
+                # Add result to steering history for filtering
+                if not hasattr(self, 'steering_history'):
+                    self.steering_history = []
+                    self.max_steering_history = 15
+                
+                self.steering_history.append(result_steering)
+                if len(self.steering_history) > self.max_steering_history:
+                    self.steering_history.pop(0)
+                    
+                # Apply weighted moving average filter to smooth steering
+                if len(self.steering_history) >= 5:  # Increased from 3 for more data points
+                    # Exponential weights that emphasize recent values but with stronger smoothing
+                    if emergency_factor > 0.5:
+                        weights = [0.05, 0.1, 0.15, 0.2, 0.5]  # More responsive in emergency
+                    else:
+                        weights = [0.05, 0.1, 0.15, 0.3, 0.4]  # More smoothing in normal driving
+                    
+                    # Normalize weights to ensure they sum to 1.0
+                    weight_sum = sum(weights)
+                    weights = [w/weight_sum for w in weights]
+                    
+                    result_steering = sum(w * s for w, s in zip(weights, self.steering_history[-5:]))
+                
+                # Avoid sudden steering changes by limiting change rate
+                if hasattr(self, 'previous_steering'):
+                    # Limit steering rate of change (more strict in normal driving)
+                    max_change_rate = 0.05 * (1.0 - emergency_factor) + 0.15 * emergency_factor
+                    steering_delta = result_steering - self.previous_steering
+                    if abs(steering_delta) > max_change_rate:
+                        # Limit the change rate
+                        result_steering = self.previous_steering + np.sign(steering_delta) * max_change_rate
+                        
+                # Save current steering for next iteration
+                self.previous_steering = result_steering
         
         # Return updated data with avoidance information
-        data["emergency"] = is_emergency
-        data["obstacle_distance"] = distance_to_obstacle
-        data["obstacle_id"] = obstacle_id
-        data["avoidance_bias"] = avoidance_bias
-        data["emergency_blend"] = emergency_factor
-        
-        return {
+        result = {
             "steering_angle": result_steering,
-            "is_emergency": is_emergency
+            "is_emergency": is_emergency,
+            "emergency_blend": emergency_factor,
+            "avoidance_bias": avoidance_bias
         }
+        
+        return result
 
-    def _handle_speed_control(self, data, emergency=False):
-        """Handle speed control based on vehicle state and obstacles."""
-        # Get vehicle data
-        vehicle = data["vehicle"]
+    def _handle_speed_control(self, data, is_emergency=False):
+        """Calculate speed and acceleration based on the current situation.
         
-        # Get current speed and emergency information
-        current_speed = data.get("current_speed", 0)
+        Args:
+            data: Data dictionary containing scene and vehicle information
+            is_emergency: Whether we're in an emergency situation
+        
+        Returns:
+            Dict with target_speed and acceleration values
+        """
+        # Extract key info
+        vehicle = data.get("vehicle", {})
+        current_speed = self._calculate_speed(vehicle)
+        
+        # Get obstacle information
         has_obstacles = data.get("has_obstacles", False)
-        distance_to_obstacle = data.get("distance_to_obstacle", float('inf'))
-        emergency_blend = data.get("emergency_blend", 0.0)
-        avoidance_direction = data.get("avoidance_direction", 0)
-        is_curved_road = data.get("is_curved_road", False)
+        distance_to_obstacle = data.get("obstacle_distance", float('inf'))
+        obstacle_info = data.get("obstacle_info", {})
         
-        # Initialize target speed to normal cruise speed
+        # Improved obstacle certainty handling
+        certainty = 1.0  # Default to full certainty if not provided
+        if obstacle_info and "certainty" in obstacle_info:
+            certainty = obstacle_info["certainty"]
+        
+        # Get emergency status
+        emergency = is_emergency or data.get("emergency", False)
+        emergency_blend = data.get("emergency_blend", 0) if "emergency_blend" in data else 0.0
+        
+        # Default values
         target_speed = self.target_speed
         
-        # For curved roads, reduce target speed
-        if is_curved_road:
-            # Reduce speed proportional to curve intensity
-            curve_factor = 1.0 - min(0.4, self.curve_intensity * 4.0)  # Max 40% reduction
-            target_speed *= curve_factor
+        # If we're in an emergency situation, reduce speed dramatically
+        if emergency:
+            # Scale emergency braking by certainty and emergency_blend
+            emergency_factor = certainty * emergency_blend
             
-            # Ensure minimum speed on curves
-            target_speed = max(5.0, target_speed)
-        
-        # Apply speed control based on obstacle distance with smooth blending
-        if has_obstacles and distance_to_obstacle < float('inf'):
-            # Calculate appropriate speed based on distance to obstacle
-            # More gradual speed reduction curve
-            distance_factor = min(1.0, max(0.0, distance_to_obstacle / (self.collision_threshold * 3.0)))
-            
-            # Apply non-linear scaling for smoother transitions
-            distance_factor = distance_factor ** 1.5  # More responsive at medium distances
-            
-            # Calculate obstacle-based target speed
-            obstacle_target_speed = self.target_speed * distance_factor
-            
-            # Set minimum speed based on emergency level for better control
-            min_speed = 2.0 + (1.0 - emergency_blend) * 3.0  # 2.0 to 5.0 based on emergency level
-            obstacle_target_speed = max(min_speed, obstacle_target_speed)
-            
-            # Blend between normal and obstacle-based speed using emergency blend factor
-            target_speed = (1.0 - emergency_blend) * target_speed + emergency_blend * obstacle_target_speed
-            
-            # If actively steering to avoid obstacle, maintain adequate speed for effective steering
-            if abs(avoidance_direction) > 0.3 and emergency_blend > 0.5:
-                steering_min_speed = 3.5  # Minimum speed needed for effective steering
-                target_speed = max(steering_min_speed, target_speed)
-        
-        # Calculate required acceleration/deceleration
-        speed_diff = target_speed - current_speed
-        
-        # Apply acceleration with smoother profile
-        if speed_diff > 0:
-            # Accelerate - more responsive at lower speeds
-            accel_factor = 1.0
-            if current_speed < 3.0:
-                # Boost acceleration at very low speeds for better responsiveness
-                accel_factor = 1.3
+            # Progressive speed reduction based on obstacle distance and emergency level
+            if distance_to_obstacle < 5.0:
+                # Very close obstacle - almost stop
+                target_speed = 0.5 + (1.0 - emergency_factor) * 2.0
+            elif distance_to_obstacle < 10.0:
+                # Close obstacle - slow down significantly
+                target_speed = 2.0 + (1.0 - emergency_factor) * 4.0
+            else:
+                # Distant obstacle but still emergency - moderate slowdown
+                # Allow higher speeds for less certain detections
+                certainty_factor = min(1.0, certainty + 0.3)  # Bias toward caution
+                target_speed = max(5.0, self.target_speed * (1.0 - certainty_factor * 0.5))
                 
-            acceleration = min(speed_diff, self.max_acceleration * accel_factor)
+            # Cap emergency target speed by current speed to prevent acceleration in emergency
+            target_speed = min(target_speed, current_speed)
+            
+        # For normal obstacle avoidance (not emergency)
+        elif has_obstacles and distance_to_obstacle < 40.0:
+            # Adjust target speed based on distance to obstacle
+            # Using sigmoid function for smooth transition
+            distance_factor = 1.0 / (1.0 + math.exp(-(distance_to_obstacle - 20.0) / 5.0))
+            
+            # Apply certainty to the distance factor
+            certainty_adjusted_factor = distance_factor + (1.0 - certainty) * (1.0 - distance_factor)
+            
+            # Adjust target speed gradually based on obstacle distance
+            min_cruise_speed = 3.0
+            target_speed = min_cruise_speed + (self.target_speed - min_cruise_speed) * certainty_adjusted_factor
+            
+            # Add speed margin based on object type if available
+            if obstacle_info and "type" in obstacle_info:
+                obj_type = obstacle_info["type"]
+                
+                # Cautious around pedestrians, more relaxed around vehicles
+                if obj_type == "PEDESTRIAN":
+                    target_speed *= 0.7  # Slower around pedestrians
+                elif obj_type in ["BICYCLE", "MOTORCYCLE"]:
+                    target_speed *= 0.8  # Slower around cycles
+        
+        # Calculate acceleration based on speed error
+        speed_error = target_speed - current_speed
+        
+        # More sophisticated acceleration control
+        if speed_error > 0:
+            # Accelerate - smoother acceleration for comfort
+            acceleration = min(self.max_acceleration, speed_error * 0.5)
         else:
-            # Decelerate - with emergency-based scaling
-            decel_factor = 1.0 + emergency_blend * 0.5  # 1.0 to 1.5 based on emergency level
+            # Brake - progressive braking force
+            # Base deceleration proportional to speed error
+            base_deceleration = min(self.max_deceleration, abs(speed_error) * 0.8)
             
-            # Reduce deceleration when actively steering to prevent understeer
-            if abs(avoidance_direction) > 0.5 and emergency_blend > 0.7:
-                decel_factor *= 0.7  # Reduce braking during active steering
+            # Enhanced braking in emergency situations
+            if emergency:
+                # Scale by emergency_blend for smoother transitions
+                emergency_decel = self.max_deceleration * emergency_blend
+                # Combine approaches - take the stronger of the two
+                deceleration = max(base_deceleration, emergency_decel)
+            else:
+                deceleration = base_deceleration
                 
-            acceleration = max(speed_diff, -self.max_deceleration * decel_factor)
+            # Apply final deceleration
+            acceleration = -deceleration
         
-        # Return speed control results
+        # Return calculated values
         return {
             "target_speed": target_speed,
             "acceleration": acceleration
@@ -1073,7 +1313,7 @@ class LaneKeepingLogic(AutonomousLogic):
             road: Road data (can be None)
             
         Returns:
-            tuple: (has_obstacles, closest_obstacle, distance_to_obstacle)
+            tuple: (has_obstacles, closest_obstacle, distance_to_obstacle, obstacle_info)
         """
         has_obstacles = False
         closest_obstacle = None
@@ -1090,19 +1330,32 @@ class LaneKeepingLogic(AutonomousLogic):
         
         # Enhanced detection parameters
         # 1. Immediate detection zone (narrower but longer)
-        immediate_zone_width = vehicle_dimensions[1] * 2.0  # Increased from 1.8
-        immediate_zone_length = vehicle_dimensions[0] * 10.0  # Increased from 8.0
+        immediate_zone_width = vehicle_dimensions[1] * 2.0
+        immediate_zone_length = vehicle_dimensions[0] * 10.0
         
         # 2. Forward detection zone (wider but shorter)
-        forward_zone_width = vehicle_dimensions[1] * 3.5  # Increased from 3.0
-        forward_zone_length = vehicle_dimensions[0] * 18.0  # Increased from 15.0
+        forward_zone_width = vehicle_dimensions[1] * 3.5
+        forward_zone_length = vehicle_dimensions[0] * 18.0
         
         # 3. Extended awareness zone (widest but with diminishing importance)
-        awareness_zone_width = vehicle_dimensions[1] * 4.5  # Increased from 4.0
-        awareness_zone_length = vehicle_dimensions[0] * 30.0  # Increased from 25.0
+        awareness_zone_width = vehicle_dimensions[1] * 4.5
+        awareness_zone_length = vehicle_dimensions[0] * 30.0
         
         # Keep track of priority obstacles
         priority_obstacles = []
+        
+        # Object type weights for priority calculation
+        object_type_weights = {
+            'PEDESTRIAN': 2.5,    # Highest priority - vulnerable and unpredictable
+            'CYCLIST': 2.0,       # High priority - vulnerable
+            'TRICAR': 1.5,        # Medium-high priority
+            'CAR': 1.2,           # Medium priority
+            'TRUCK': 1.0          # Base priority (but physically larger)
+        }
+        
+        # Initialize/update velocity history if needed
+        if not hasattr(self, 'velocity_history'):
+            self.velocity_history = {}
         
         # Check each object
         for obj in objects:
@@ -1121,44 +1374,169 @@ class LaneKeepingLogic(AutonomousLogic):
             # Only consider obstacles ahead of the vehicle (with small buffer behind for large vehicles)
             if forward_distance > -vehicle_dimensions[0]:
                 # Assign priority based on which zone the obstacle is in
-                priority = 0
+                zone_priority = 0
                 
                 # Check immediate zone (highest priority)
                 if forward_distance < immediate_zone_length and lateral_distance < immediate_zone_width:
-                    priority = 3  # Highest priority - immediate danger
+                    zone_priority = 3  # Highest priority - immediate danger
                     
                 # Check forward zone (medium priority)
                 elif forward_distance < forward_zone_length and lateral_distance < forward_zone_width:
-                    priority = 2  # Medium priority - approaching obstacle
+                    zone_priority = 2  # Medium priority - approaching obstacle
                     
                 # Check awareness zone (lowest priority)
                 elif forward_distance < awareness_zone_length and lateral_distance < awareness_zone_width:
                     # Lower priority for more distant and lateral obstacles
-                    priority = 1  # Low priority - distant obstacle
+                    zone_priority = 1  # Low priority - distant obstacle
                 
                 # If obstacle is in any detection zone
-                if priority > 0:
+                if zone_priority > 0:
                     has_obstacles = True
                     
-                    # Adjust effective distance based on priority and lateral position
-                    # Obstacles directly ahead feel closer than ones to the side
-                    centrality_factor = 1.0 - 0.6 * (lateral_distance / immediate_zone_width)  # Reduced from 0.7
-                    centrality_factor = max(0.4, centrality_factor)  # Increased from 0.3 - don't discount too much
+                    # Get object type
+                    obj_type = obj.get('type', None)
+                    obj_type_name = obj_type.name if obj_type else 'CAR'
                     
-                    # Calculate effective distance (used for prioritization)
-                    effective_distance = distance / (centrality_factor * priority)
+                    # Calculate base type priority
+                    type_priority = object_type_weights.get(obj_type_name, 1.0)
+                    
+                    # Track velocity for moving objects
+                    obj_velocity = np.array(obj.get('velocity', [0, 0, 0]))
+                    obj_speed = np.linalg.norm(obj_velocity)
+                    obj_id = obj['id']
+                    
+                    # Store velocity history for this object
+                    if obj_id not in self.velocity_history:
+                        self.velocity_history[obj_id] = {
+                            'positions': [np.array(obj['position'])],
+                            'velocities': [obj_velocity],
+                            'timestamps': [time.time() if 'time' not in locals() else time],
+                            'predicted_path': []
+                        }
+                    else:
+                        # Update history (keep last 5 positions)
+                        history = self.velocity_history[obj_id]
+                        history['positions'].append(np.array(obj['position']))
+                        history['velocities'].append(obj_velocity)
+                        history['timestamps'].append(time.time() if 'time' not in locals() else time)
+                        
+                        # Limit history size
+                        if len(history['positions']) > 5:
+                            history['positions'].pop(0)
+                            history['velocities'].pop(0)
+                            history['timestamps'].pop(0)
+                        
+                        # Predict future path if we have at least 2 positions
+                        if len(history['positions']) >= 2:
+                            # Simple linear prediction for 3 seconds ahead
+                            current_pos = history['positions'][-1]
+                            avg_velocity = np.mean(history['velocities'], axis=0)
+                            
+                            # Generate prediction points (1, 2, and 3 seconds ahead)
+                            predicted_path = []
+                            for t in range(1, 4):
+                                future_pos = current_pos + avg_velocity * t
+                                predicted_path.append(future_pos)
+                            
+                            history['predicted_path'] = predicted_path
+                    
+                    # Check if object is moving toward vehicle's path
+                    is_moving_toward_vehicle = False
+                    collision_risk = 0
+                    
+                    if obj_speed > 0.2:  # Only consider moving objects
+                        # Calculate object's heading
+                        obj_heading = np.arctan2(obj_velocity[1], obj_velocity[0])
+                        
+                        # Calculate angle between object's heading and vehicle-to-object vector
+                        to_vehicle_angle = np.arctan2(-rel_pos[1], -rel_pos[0])
+                        angle_diff = abs((obj_heading - to_vehicle_angle + np.pi) % (2 * np.pi) - np.pi)
+                        
+                        # If object is moving in the general direction of the vehicle
+                        if angle_diff < np.pi / 3:  # Within 60 degrees
+                            is_moving_toward_vehicle = True
+                            
+                            # Calculate potential collision point
+                            # Simple time-to-collision estimate
+                            if distance > 0.1:  # Avoid division by zero
+                                time_to_collision = distance / max(0.1, obj_speed)
+                                if time_to_collision < 5.0:  # Within 5 seconds
+                                    collision_risk = 1.0 - (time_to_collision / 5.0)
+                    
+                    # Adjust priority based on motion analysis
+                    motion_priority = 1.0
+                    if is_moving_toward_vehicle:
+                        # Increase priority if object is moving toward vehicle
+                        motion_priority += collision_risk * 0.5
+                    
+                    # Adjust priority if object is a pedestrian or cyclist and moving unpredictably
+                    if obj_type_name in ['PEDESTRIAN', 'CYCLIST']:
+                        # Check for sudden direction changes in history
+                        if obj_id in self.velocity_history and len(self.velocity_history[obj_id]['velocities']) > 2:
+                            velocities = self.velocity_history[obj_id]['velocities']
+                            # Calculate angular change between consecutive velocity vectors
+                            if np.linalg.norm(velocities[-1]) > 0.1 and np.linalg.norm(velocities[-2]) > 0.1:
+                                v1 = velocities[-2] / np.linalg.norm(velocities[-2])
+                                v2 = velocities[-1] / np.linalg.norm(velocities[-1])
+                                
+                                # Check for sudden direction change
+                                direction_stability = np.dot(v1, v2)  # 1 = same direction, -1 = opposite
+                                
+                                # Lower stability means more unpredictable
+                                if direction_stability < 0.7:  # More than ~45 degree change
+                                    # Add unpredictability factor to type priority
+                                    motion_priority += 0.5 * (1.0 - direction_stability)
+                    
+                    # Adjust centrality factor based on object type (pedestrians more important even on edges)
+                    base_centrality = 1.0 - 0.6 * (lateral_distance / immediate_zone_width)
+                    if obj_type_name == 'PEDESTRIAN':
+                        # Pedestrians are important even if off to the side
+                        centrality_factor = max(0.6, base_centrality)
+                    elif obj_type_name == 'CYCLIST':
+                        # Cyclists are also important on the side
+                        centrality_factor = max(0.5, base_centrality)
+                    else:
+                        centrality_factor = max(0.4, base_centrality)
+                    
+                    # Calculate final priority score combining all factors
+                    priority_score = zone_priority * type_priority * motion_priority
+                    
+                    # Calculate effective distance (for priority sorting)
+                    effective_distance = distance / (centrality_factor * priority_score)
+                    
+                    # Create obstacle info dictionary with all relevant data
+                    obstacle_info = {
+                        'id': obj['id'],
+                        'type': obj_type_name,
+                        'distance': distance,
+                        'rel_pos': rel_pos,
+                        'priority': priority_score,
+                        'is_moving_toward_vehicle': is_moving_toward_vehicle,
+                        'collision_risk': collision_risk,
+                        'predicted_path': self.velocity_history.get(obj_id, {}).get('predicted_path', [])
+                    }
                     
                     # Add to priority list
-                    priority_obstacles.append((obj, distance, effective_distance, priority))
+                    priority_obstacles.append((obj, distance, effective_distance, priority_score, obstacle_info))
         
         # Find the highest priority obstacle, with distance as tiebreaker
+        obstacle_info = None
         if priority_obstacles:
             # Sort by priority (descending) then by distance (ascending)
             priority_obstacles.sort(key=lambda x: (-x[3], x[1]))
             closest_obstacle = priority_obstacles[0][0]
             min_distance = priority_obstacles[0][1]
+            obstacle_info = priority_obstacles[0][4]
+            
+            # Also keep track of top 3 obstacles for multi-obstacle scenarios
+            if len(priority_obstacles) > 1:
+                top_obstacles = priority_obstacles[:min(3, len(priority_obstacles))]
+                obstacle_info['nearby_obstacles'] = [
+                    {'id': ob[0]['id'], 'distance': ob[1], 'priority': ob[3]} 
+                    for ob in top_obstacles[1:]  # Skip the first one (it's the closest)
+                ]
         
-        return has_obstacles, closest_obstacle, min_distance
+        return has_obstacles, closest_obstacle, min_distance, obstacle_info
 
     def _calculate_pid_steering(self, error, dt=0.033):
         """Calculate steering angle using PID control for smoother lane keeping"""
@@ -1311,6 +1689,125 @@ class LaneKeepingLogic(AutonomousLogic):
                 steering = 0.7 * recent_avg + 0.3 * steering
         
         return steering
+
+    def _handle_steering(self, data):
+        """
+        Process steering logic based on lane following and obstacle avoidance
+        
+        Args:
+            data: Dictionary containing relevant scene data
+            
+        Returns:
+            Float representing steering angle in radians
+        """
+        # Get lane following data
+        lane_data = self._handle_lane_following(data)
+        
+        # Get obstacle avoidance data
+        obstacle_data = self._handle_obstacle_avoidance(data)
+        
+        # Base steering from lane following
+        base_steering = lane_data.get("steering_angle", 0.0)
+        
+        # Extract vehicle data for contextual decision making
+        vehicle = data.get("vehicle", {})
+        veh_vel = np.array(vehicle.get("velocity", [0, 0, 0]))
+        speed = np.linalg.norm(veh_vel)
+        
+        # Initialize final steering value
+        final_steering = base_steering
+        
+        # If obstacles are detected, consider avoidance steering
+        if obstacle_data.get("has_obstacles", False):
+            # Get avoidance direction (negative for left, positive for right)
+            avoidance_direction = obstacle_data.get("avoidance_direction", 0.0)
+            
+            # If we're in emergency situation, blend avoidance steering more strongly
+            if obstacle_data.get("emergency", False):
+                # Get emergency blend factor
+                emergency_blend = obstacle_data.get("emergency_blend", 0.0)
+                
+                # Calculate max avoidance steering based on current speed
+                # At low speeds, allow sharper turns for avoidance
+                max_avoidance_angle = np.radians(30.0)  # 30 degrees max
+                if speed < 5.0:
+                    max_avoidance_angle = np.radians(45.0)  # 45 degrees at low speed
+                elif speed > 20.0:
+                    max_avoidance_angle = np.radians(15.0)  # 15 degrees at high speed
+                
+                # Calculate avoidance steering (scale by direction and emergency blend)
+                avoidance_steering = avoidance_direction * max_avoidance_angle * emergency_blend
+                
+                # Blend base steering with avoidance steering based on emergency level
+                # Higher emergency gives more weight to avoidance
+                final_steering = base_steering * (1.0 - emergency_blend) + avoidance_steering * emergency_blend
+            else:
+                # For non-emergency situations, apply gentler avoidance
+                # Calculate avoidance influence based on obstacle distance
+                obstacle_distance = obstacle_data.get("obstacle_distance", float('inf'))
+                avoidance_influence = 0.0
+                
+                # Only apply gentle avoidance for obstacles within a reasonable distance
+                if obstacle_distance < 30.0:
+                    avoidance_influence = 0.3 * (1.0 - min(1.0, obstacle_distance / 30.0))
+                    
+                    # Get obstacle information for more intelligent decision making
+                    obstacle_info = obstacle_data.get("obstacle_info", {})
+                    obstacle_type = obstacle_info.get("type", "UNKNOWN")
+                    will_cross_path = obstacle_info.get("will_cross_path", False)
+                    
+                    # Adjust influence based on obstacle type and movement pattern
+                    if obstacle_type == "PEDESTRIAN":
+                        # More cautious around pedestrians
+                        avoidance_influence *= 1.5
+                    elif will_cross_path:
+                        # More cautious with objects predicted to cross our path
+                        avoidance_influence *= 1.3
+                
+                # Calculate gentle avoidance steering
+                gentle_avoidance = avoidance_direction * np.radians(10.0) * avoidance_influence
+                
+                # Blend with base steering
+                final_steering = base_steering + gentle_avoidance
+        
+        # Apply steering limits and smoothing
+        max_steering_angle = np.radians(25.0)  # 25 degrees max
+        
+        # Limit steering angle
+        final_steering = np.clip(final_steering, -max_steering_angle, max_steering_angle)
+        
+        # Apply steering rate limiting for smoother control
+        # Get previous steering angle
+        prev_steering = self._prev_steering
+        
+        # Calculate maximum change in steering per step
+        max_steering_delta = np.radians(3.0)  # 3 degrees max change per step
+        
+        # Apply rate limiting
+        if prev_steering is not None:
+            steering_delta = final_steering - prev_steering
+            if abs(steering_delta) > max_steering_delta:
+                # Limit the rate of change
+                steering_delta = np.sign(steering_delta) * max_steering_delta
+                final_steering = prev_steering + steering_delta
+        
+        # Store current steering for next iteration
+        self._prev_steering = final_steering
+        
+        # Create debug data for visualization and logging
+        debug_data = {
+            "base_steering": np.degrees(base_steering),
+            "final_steering": np.degrees(final_steering),
+            "has_obstacles": obstacle_data.get("has_obstacles", False),
+            "obstacle_distance": obstacle_data.get("obstacle_distance", float('inf')),
+            "emergency": obstacle_data.get("emergency", False),
+            "avoidance_direction": obstacle_data.get("avoidance_direction", 0.0)
+        }
+        
+        # Store debug data in the autonomous state
+        self._last_debug["steering"] = debug_data
+        
+        return final_steering
 
 # Factory method to get different autonomous logic implementations
 def get_autonomous_logic(logic_type='lane_keeping'):

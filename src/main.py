@@ -55,19 +55,45 @@ def show_camera_window(camera_sensor):
 
 def show_lidar_window(lidar_sensor):
     """Show a simple LiDAR view."""
+    global lidar_img  # Use a global variable to avoid recreating the image each time
+    
+    if not hasattr(show_lidar_window, 'img'):
+        # Initialize the static image only once
+        show_lidar_window.img = np.zeros((800, 800, 3), dtype=np.uint8)
+        show_lidar_window.img_size = 800
+        show_lidar_window.center_x = show_lidar_window.img_size // 2
+        show_lidar_window.center_y = show_lidar_window.img_size // 2
+        
+        # Pre-draw the static elements (range circles and center point)
+        scale = 5.0  # 1 meter = 5 pixels
+        
+        # Draw range indicators (10m, 20m, etc.)
+        for r in range(10, 81, 10):
+            radius = int(r * scale)
+            cv2.circle(show_lidar_window.img, 
+                      (show_lidar_window.center_x, show_lidar_window.center_y), 
+                      radius, (50, 50, 50), 1)
+            # Add label
+            cv2.putText(show_lidar_window.img, f"{r}m", 
+                       (show_lidar_window.center_x + radius, show_lidar_window.center_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+    
     if lidar_sensor and lidar_sensor.enabled:
         try:
             points = lidar_sensor.get_data()
             if points is not None and len(points) > 0:
-                # Create a simple 2D top-down view of the LiDAR points
-                img_size = 800
-                img = np.zeros((img_size, img_size, 3), dtype=np.uint8)
+                # Create a copy of the base image with static elements
+                img = show_lidar_window.img.copy()
                 
                 # Scale and center points
                 scale = 5.0  # 1 meter = 5 pixels
-                center_x, center_y = img_size // 2, img_size // 2
                 
-                for point in points:
+                # Optimize by reducing the number of points to draw even further for better performance
+                max_points = min(1500, len(points))  # Reduced from 3000 to 1500 for better performance
+                step = max(1, len(points) // max_points)
+                
+                for i in range(0, len(points), step):
+                    point = points[i]
                     x, y, z, intensity = point
                     
                     # Skip points that are too far or too high/low
@@ -75,30 +101,25 @@ def show_lidar_window(lidar_sensor):
                         continue
                     
                     # Calculate pixel coordinates
-                    px = int(center_x + y * scale)  # Y is left/right
-                    py = int(center_y - x * scale)  # X is forward/backward
+                    px = int(show_lidar_window.center_x + y * scale)  # Y is left/right
+                    py = int(show_lidar_window.center_y - x * scale)  # X is forward/backward
                     
                     # Check if within image bounds
-                    if 0 <= px < img_size and 0 <= py < img_size:
-                        # Color by height (blue to red)
-                        normalized_z = min(1.0, max(0.0, (z + 2) / 4.0))
-                        r = int(255 * normalized_z)
-                        b = int(255 * (1 - normalized_z))
-                        g = 0
+                    if 0 <= px < show_lidar_window.img_size and 0 <= py < show_lidar_window.img_size:
+                        # Simplified color scheme for performance - use a fixed color instead of computing
+                        # Only use simple color based on height: below ground (blue), ground level (green), above ground (red)
+                        if z < -0.5:
+                            color = (255, 0, 0)  # Blue
+                        elif z > 0.5:
+                            color = (0, 0, 255)  # Red
+                        else:
+                            color = (0, 255, 0)  # Green
                         
-                        # Draw point
-                        cv2.circle(img, (px, py), 1, (b, g, r), -1)
+                        # Draw point - faster with fixed size
+                        cv2.circle(img, (px, py), 1, color, -1)
                 
                 # Draw origin
-                cv2.circle(img, (center_x, center_y), 5, (0, 255, 0), -1)
-                
-                # Draw range indicators (10m, 20m, etc.)
-                for r in range(10, 81, 10):
-                    radius = int(r * scale)
-                    cv2.circle(img, (center_x, center_y), radius, (50, 50, 50), 1)
-                    # Add label
-                    cv2.putText(img, f"{r}m", (center_x + radius, center_y), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+                cv2.circle(img, (show_lidar_window.center_x, show_lidar_window.center_y), 5, (0, 255, 0), -1)
                 
                 # Show image
                 cv2.imshow('LiDAR View (Top-Down)', img)
@@ -110,6 +131,28 @@ def show_lidar_window(lidar_sensor):
 
 def show_radar_window(radar_sensor):
     """Show a simple radar view."""
+    
+    if not hasattr(show_radar_window, 'img'):
+        # Initialize the static image only once
+        show_radar_window.img_size = 600
+        show_radar_window.img = np.zeros((show_radar_window.img_size, show_radar_window.img_size, 3), dtype=np.uint8)
+        show_radar_window.center_x = show_radar_window.img_size // 2
+        show_radar_window.center_y = show_radar_window.img_size // 2
+        
+        # Pre-draw the range circles
+        max_range = 100  # Default max range
+        scale = show_radar_window.img_size / (2 * max_range)
+        
+        # Draw range circles
+        for r in range(0, int(max_range) + 1, 20):
+            radius = int(r * scale)
+            cv2.circle(show_radar_window.img, (show_radar_window.center_x, show_radar_window.center_y), 
+                      radius, (50, 50, 50), 1)
+            # Add label
+            cv2.putText(show_radar_window.img, f"{r}m", 
+                       (show_radar_window.center_x + radius, show_radar_window.center_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+    
     if radar_sensor and radar_sensor.enabled:
         try:
             radar_data = radar_sensor.get_data()
@@ -117,65 +160,60 @@ def show_radar_window(radar_sensor):
                 points, velocities = radar_data
                 
                 if len(points) > 0:
-                    # Create a simple top-down radar view
-                    img_size = 600
-                    img = np.zeros((img_size, img_size, 3), dtype=np.uint8)
+                    # Create a copy of the base image with static elements
+                    img = show_radar_window.img.copy()
                     
-                    # Draw radar field of view
-                    center_x, center_y = img_size // 2, img_size // 2
+                    # Use sensor's actual parameters
                     fov_deg = radar_sensor.fov_deg
                     max_range = radar_sensor.range
-                    scale = img_size / (2 * max_range)
-                    
-                    # Draw range circles
-                    for r in range(0, int(max_range) + 1, 20):
-                        radius = int(r * scale)
-                        cv2.circle(img, (center_x, center_y), radius, (50, 50, 50), 1)
-                        # Add label
-                        cv2.putText(img, f"{r}m", (center_x + radius, center_y), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+                    scale = show_radar_window.img_size / (2 * max_range)
                     
                     # Draw FOV lines
                     left_angle = -fov_deg / 2
                     right_angle = fov_deg / 2
                     
                     # Calculate endpoints of FOV lines
-                    left_x = center_x + int(max_range * scale * np.sin(np.radians(left_angle)))
-                    left_y = center_y - int(max_range * scale * np.cos(np.radians(left_angle)))
-                    right_x = center_x + int(max_range * scale * np.sin(np.radians(right_angle)))
-                    right_y = center_y - int(max_range * scale * np.cos(np.radians(right_angle)))
+                    left_x = show_radar_window.center_x + int(max_range * scale * np.sin(np.radians(left_angle)))
+                    left_y = show_radar_window.center_y - int(max_range * scale * np.cos(np.radians(left_angle)))
+                    right_x = show_radar_window.center_x + int(max_range * scale * np.sin(np.radians(right_angle)))
+                    right_y = show_radar_window.center_y - int(max_range * scale * np.cos(np.radians(right_angle)))
                     
                     # Draw FOV lines
-                    cv2.line(img, (center_x, center_y), (left_x, left_y), (0, 0, 255), 1)
-                    cv2.line(img, (center_x, center_y), (right_x, right_y), (0, 0, 255), 1)
+                    cv2.line(img, (show_radar_window.center_x, show_radar_window.center_y), (left_x, left_y), (0, 0, 255), 1)
+                    cv2.line(img, (show_radar_window.center_x, show_radar_window.center_y), (right_x, right_y), (0, 0, 255), 1)
                     
-                    # Draw radar points
-                    for i, point in enumerate(points):
-                        distance, azimuth, elevation = point
-                        
-                        # Calculate point position in image
-                        angle_rad = np.radians(azimuth)
-                        x = center_x + int(distance * scale * np.sin(angle_rad))
-                        y = center_y - int(distance * scale * np.cos(angle_rad))
-                        
-                        if 0 <= x < img_size and 0 <= y < img_size:
-                            # Color by velocity - Ensure i is within range of velocities
-                            if i < len(velocities):
-                                vel = velocities[i]
-                                # Red for approaching, green for moving away
-                                if vel < 0:  # Approaching
-                                    color = (0, 0, 255)  # Red
-                                else:  # Moving away
-                                    color = (0, 255, 0)  # Green
-                                
-                                # Size by velocity magnitude
-                                size = max(2, min(8, int(abs(vel) + 2)))
-                            else:
-                                color = (255, 255, 0)  # Yellow
-                                size = 3
+                    # Draw radar points - limit points if there are too many
+                    max_points = min(200, len(points))
+                    step = max(1, len(points) // max_points)
+                    
+                    for i in range(0, len(points), step):
+                        if i < len(points):
+                            point = points[i]
+                            distance, azimuth, elevation = point
                             
-                            # Draw the radar point
-                            cv2.circle(img, (x, y), size, color, -1)
+                            # Calculate point position in image
+                            angle_rad = np.radians(azimuth)
+                            x = show_radar_window.center_x + int(distance * scale * np.sin(angle_rad))
+                            y = show_radar_window.center_y - int(distance * scale * np.cos(angle_rad))
+                            
+                            if 0 <= x < show_radar_window.img_size and 0 <= y < show_radar_window.img_size:
+                                # Color by velocity - Ensure i is within range of velocities
+                                if i < len(velocities):
+                                    vel = velocities[i]
+                                    # Red for approaching, green for moving away
+                                    if vel < 0:  # Approaching
+                                        color = (0, 0, 255)  # Red
+                                    else:  # Moving away
+                                        color = (0, 255, 0)  # Green
+                                    
+                                    # Size by velocity magnitude
+                                    size = max(2, min(8, int(abs(vel) + 2)))
+                                else:
+                                    color = (255, 255, 0)  # Yellow
+                                    size = 3
+                                
+                                # Draw the radar point
+                                cv2.circle(img, (x, y), size, color, -1)
                     
                     # Show image
                     cv2.imshow('Radar View', img)
@@ -242,7 +280,7 @@ def main():
         last_time = time.time()
         frame_count = 0
         last_sensor_render_time = 0
-        sensor_render_interval = 0.5  # Render sensor views 2 times per second (more conservative)
+        sensor_render_interval = 0.05  # Increased update frequency (20 times per second)
         
         # Get sensor managers once
         sensor_manager = None
@@ -285,12 +323,12 @@ def main():
                             # Apply quality changes
                             if current_quality_level == 0:
                                 print("Switching to ULTRA LOW quality mode due to performance")
-                                # Reduce update frequency drastically
+                                # Reduce update frequency but still maintain reasonable responsiveness
                                 for sensor_name in sensor_manager.sensors:
-                                    if sensor_name in sensor_manager.sensors:  # Kiểm tra lại để đảm bảo sensor vẫn tồn tại
+                                    if sensor_name in sensor_manager.sensors:
                                         sensor = sensor_manager.sensors[sensor_name]
-                                        sensor.update_frequency = max(5.0, sensor.update_frequency / 2)
-                                sensor_render_interval = 1.0  # Reduce to once per second
+                                        sensor.update_frequency = max(8.0, sensor.update_frequency / 1.5)
+                                sensor_render_interval = 0.1  # Update 10 times per second, still responsive
                             
                         # Increase quality if FPS is high enough
                         elif avg_fps > high_fps_threshold and current_quality_level < 1:

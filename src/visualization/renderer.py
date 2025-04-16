@@ -630,20 +630,29 @@ class Renderer:
         # Update the 3D steering wheel
         self._update_steering_wheel(steering_angle)
         
-        # All debug printing is disabled to improve performance
-        # Only print FPS every 150 frames
-        if hasattr(self, 'frame_count'):
-            self.frame_count += 1
-        else:
+        # Initialize frame counter if needed
+        if not hasattr(self, 'frame_count'):
             self.frame_count = 0
-            
-        # Only output FPS occasionally
-        if self.frame_count % 150 == 0:
+        self.frame_count += 1
+        
+        # Only output debug info every 300 frames
+        if self.frame_count % 300 == 0:
             # Get objects count
             objects_count = len(scene_data.get('objects', []))
             # Calculate FPS
             current_time = time.time()
+            fps = 0
             if hasattr(self, 'last_fps_time'):
-                fps = 1.0 / max(0.001, current_time - self.last_fps_time)
-                print(f"FPS: {fps:.1f}, Objects: {objects_count}")
+                time_diff = current_time - self.last_fps_time
+                if time_diff > 0:
+                    fps = 1.0 / time_diff
+            
+            # Convert steering angle from radians to degrees
+            steering_deg = steering_angle * 180.0 / math.pi
+            
+            # Print debug info
+            print(f"FPS: {fps:.1f}, Objects: {objects_count}")
+            print(f"Steering angle: {steering_deg:.1f}°")
+            
+            # Update last time
             self.last_fps_time = current_time 
