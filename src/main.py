@@ -399,7 +399,9 @@ def main():
     except KeyboardInterrupt:
         print("\nExiting simulation...")
     except Exception as e:
+        import traceback
         print(f"Error in simulation: {e}")
+        traceback.print_exc()
     finally:
         # Clean up resources
         print("Cleaning up...")
